@@ -32,7 +32,7 @@
 | 域名 | A 记录指向服务器 IP | `geo.example.com` |
 | 端口 | 安全组放行 22 / 80 / 443 | — |
 | 仓库 | 后端私仓已推到 GitHub | `github.com/<你>/geo-backend` |
-| 前端仓 | 学弟的前端私仓 | `github.com/<学弟>/geo-frontend` |
+| 前端仓 | 前端的前端私仓 | `github.com/<前端>/geo-frontend` |
 
 下文命令统一用这些变量，执行前替换掉：
 
@@ -40,6 +40,33 @@
 SERVER_IP=1.2.3.4
 DOMAIN=geo.example.com
 ```
+
+## 一点五、首次部署时间线与验证点
+
+第一次做大约 40–60 分钟（含装依赖）。每完成一步都有明确的验证动作，**验证不过不要往下走**，否则错误会累积到最后难以定位。
+
+| 阶段 | 大概耗时 | 做完的验证动作 | 期望结果 |
+|---|---|---|---|
+| DNS + 安全组 | 5 分钟（等生效 1–10 分钟） | `ping geo.example.com` | 返回服务器 IP |
+| 建用户 / 禁 root | 5 分钟 | 新开终端 `ssh deploy@IP` | 能登录，`whoami` 是 deploy |
+| 装依赖 | 8–10 分钟 | `python3 -V && node -v && nginx -v` | 都打印出版本号 |
+| 建库 | 3 分钟 | `psql "postgresql://..." -c '\conninfo'` | 显示 connected to database "geo" |
+| 拉代码 | 3 分钟 | `ls /opt/geo/backend/app` | 看到 `main.py` |
+| 后端依赖 + .env | 5 分钟 | `.venv/bin/python -c "import fastapi"` | 无报错 |
+| 迁移 + seed | 3 分钟 | `.venv/bin/alembic current` | 打印迁移版本号 |
+| systemd | 3 分钟 | `curl 127.0.0.1:8000/api/v1/health` | `{"code":"ok",...}` |
+| 前端构建 | 5–8 分钟 | `ls /var/www/geo/index.html` | 文件存在 |
+| Nginx | 3 分钟 | `curl -I http://geo.example.com` | `200`（此时还没 https） |
+| HTTPS | 3 分钟 | 浏览器打开域名 | 有锁，`/api/v1/health` 也通 |
+| 防火墙 + 备份 | 3 分钟 | `ufw status`；`crontab -l` | 只有 22/80/443；有备份任务 |
+
+最容易卡住的三步，以及典型表现：
+
+| 卡在哪 | 典型表现 | 直接去看 |
+|---|---|---|
+| 拉代码 | `Permission denied (publickey)` | Deploy Key 没加，或 `~/.ssh/config` 的 Host 别名和 clone 地址不一致 |
+| 前端构建 | 进程被 `Killed` | 内存不够，回去补 swap |
+| HTTPS | `Failed authorization procedure` | DNS 没生效，或 80 端口被别的站点占用（`nginx -t` + 删 default 站点） |
 
 ## 二、第一步：DNS 与安全组
 
@@ -142,7 +169,7 @@ Host github-frontend
 mkdir -p /opt/geo && sudo chown -R deploy:deploy /opt/geo
 cd /opt/geo
 git clone git@github-backend:<你>/geo-backend.git backend
-git clone git@github-frontend:<学弟>/geo-frontend.git frontend
+git clone git@github-frontend:<前端>/geo-frontend.git frontend
 ```
 
 `/opt/geo` 下的目录结构：

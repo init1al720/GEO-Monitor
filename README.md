@@ -12,7 +12,8 @@ GEO 优化监测平台后端 —— 监测品牌在生成式引擎（DeepSeek / 
 
 | 文档 | 内容 |
 |---|---|
-| [docs/01-week1-plan.md](docs/01-week1-plan.md) | 第一周详细计划：接口契约、表结构、按天任务、验收标准 |
+| [docs/00-basics.md](docs/00-basics.md) | 基础概念：CI、JWT、OpenAPI、数据库迁移、反向代理、systemd |
+| [docs/01-week1-plan.md](docs/01-week1-plan.md) | 第一周详细计划：接口契约、表结构、逐日任务、代码骨架、验收标准 |
 | [docs/02-deploy.md](docs/02-deploy.md) | 服务器部署手册：Nginx + systemd + Postgres + HTTPS + 更新回滚 |
 | [docs/03-github.md](docs/03-github.md) | GitHub 操作清单：建仓、权限、CI、部署密钥、协作规范 |
 
@@ -71,6 +72,7 @@ uvicorn app.main:app --reload
 │  └─ utils/                     # 纯工具函数（时间、加密、ID 生成）
 ├─ tests/                        # pytest 用例
 ├─ docs/                         # 计划、部署、协作文档
+│  ├─ 00-basics.md               # 基础概念（CI / JWT / 迁移 / 反代）
 │  ├─ 01-week1-plan.md           # 第一周计划与接口契约
 │  ├─ 02-deploy.md               # 服务器部署手册
 │  └─ 03-github.md               # GitHub 操作清单
