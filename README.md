@@ -1,11 +1,20 @@
-# backend-framework
+# geo-backend
 
-FastAPI 后端基础框架。已经封装好分层分区、统一响应、统一异常、带链路追踪的日志与 CI，
-新建业务模块时只需照 `examples` 的写法填空，不需要再动基础设施代码。
+GEO 优化监测平台后端 —— 监测品牌在生成式引擎（DeepSeek / 豆包 / 通义等）回答中的曝光情况。
+基于 FastAPI 基础框架搭建：分层分区、统一响应、统一异常、带链路追踪的日志与 CI 都已就位，
+新增业务模块时照 `app/api/v1/endpoints/example.py` 的写法填空即可。
 
-- 技术栈：Python 3.11+ / FastAPI / Pydantic v2 / Uvicorn
-- 数据层：暂未接入（`app/models`、`app/repositories` 已留好接口与说明）
-- 已包含：多环境配置、统一响应信封、全局异常、JSON 日志 + request_id、Docker 无关的本地启动、GitHub Actions CI
+- 技术栈：Python 3.11+ / FastAPI / Pydantic v2 / SQLAlchemy(async) / Postgres / Uvicorn
+- 核心链路：问题库 × 引擎 → 采集原始回答 → 提及/位次分析 → 指标看板 → 导出
+- 已包含：多环境配置、统一响应信封、全局异常、JSON 日志 + request_id、GitHub Actions CI
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/01-week1-plan.md](docs/01-week1-plan.md) | 第一周详细计划：接口契约、表结构、按天任务、验收标准 |
+| [docs/02-deploy.md](docs/02-deploy.md) | 服务器部署手册：Nginx + systemd + Postgres + HTTPS + 更新回滚 |
+| [docs/03-github.md](docs/03-github.md) | GitHub 操作清单：建仓、权限、CI、部署密钥、协作规范 |
 
 ## 快速开始
 
@@ -61,6 +70,10 @@ uvicorn app.main:app --reload
 │  ├─ models/                    # ORM 模型（接库后填）
 │  └─ utils/                     # 纯工具函数（时间、加密、ID 生成）
 ├─ tests/                        # pytest 用例
+├─ docs/                         # 计划、部署、协作文档
+│  ├─ 01-week1-plan.md           # 第一周计划与接口契约
+│  ├─ 02-deploy.md               # 服务器部署手册
+│  └─ 03-github.md               # GitHub 操作清单
 ├─ .github/workflows/ci.yml      # 提交即跑 lint + format + test
 ├─ .env.example                  # 环境变量模板（.env 不入库）
 ├─ .gitignore
