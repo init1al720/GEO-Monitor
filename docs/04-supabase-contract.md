@@ -383,17 +383,11 @@ grant select on v_metric_cards, v_source_distribution, v_radar_metrics, v_sample
 --    上线前必须改成基于 Supabase Auth 的过滤（见下方说明）
 ```
 
-**当前阶段的现实**：还没有登录，所以视图实际上是公开可读的。这意味着只要有人知道你的 Supabase 地址就能看到看板数据。演示阶段可接受，但要清楚这一点。
+**注意：本节已被 `docs/05-auth-permission.md` 取代。**
 
-**加登录之后**的正确写法，是把视图改成 `security_invoker` 并按 `projects.owner_id` 过滤：
+本节给的是"还没有登录"的临时版本：视图对 `anon` 公开可读，只要有人知道 Supabase 地址就能看到全部看板数据，只在演示阶段可接受。
 
-```sql
-alter view v_metric_cards set (security_invoker = true);
--- 然后给 projects 加 owner_id uuid references auth.users(id)
--- 再给业务表加 policy: using (project_id in (select id from projects where owner_id = auth.uid()))
-```
-
-这一步在 M2 做，现在不用改。
+实际的权限方案在 `docs/sql/02-auth.sql`，执行后本节 `grant select ... to anon` 会被 `revoke` 掉，改成只授权给 `authenticated`，并且四个视图全部设为 `security_invoker = true`（否则视图会以所有者权限执行，绕过底层表的 RLS）。
 
 **必须现在就确认的一件事**：`service_role` key 生成的当下，就存进服务器环境变量，**不要**复制进微信、不要写进任何 `.ts` 文件、不要贴进聊天记录。如果已经贴过，去 Settings → API 轮换一次。
 
