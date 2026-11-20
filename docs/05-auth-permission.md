@@ -1,12 +1,12 @@
 # 认证与权限 v0.1
 
-> 方案：Supabase Auth + RLS（对应 `docs/04-supabase-contract.md` 的 BaaS 直连）
-> 交付物：`docs/sql/02-auth.sql`（86 条语句，可整段执行）+ 这份说明
+> 方案：Supabase Auth + RLS（对应 `docs/04-supabase-contract.md` 的 BaaS 直连）  
+> 交付物：`docs/sql/02-auth.sql`（86 条语句，可整段执行）+ 这份说明  
 > 状态：待前端确认接口形状，SQL 已可执行
 
 ---
 
-## 0. 为什么没有 `/auth/register` 这种接口
+## 0. 为什么没有 `/auth/        register` 这种接口
 
 Supabase 方案下，注册、登录、签发 token、刷新 token、找回密码，**全部由 Supabase Auth 处理，请求根本不经过我们的服务器**。前端直接调 SDK：
 
@@ -16,11 +16,11 @@ await supabase.auth.signUp({ email, password })
 
 所以在这个方案里，"写一个注册接口"这件事没有对应物。我能给你的、也是真正决定权限能不能立住的东西，是三样：
 
-| 交付 | 作用 | 位置 |
-|---|---|---|
-| 两张表 | `profiles`（用户资料）、`project_members`（谁在哪个项目、什么角色） | SQL 第 1、2 节 |
-| 三个触发器 | 注册即建资料、建项目即成为 owner、`updated_at` 自动更新 | SQL 第 3 节 |
-| 一套 RLS 策略 | 决定"谁能看到哪些行、谁能改哪些行" | SQL 第 5、6 节 |
+| 交付        | 作用                                              | 位置          |
+| --------- | ----------------------------------------------- | ----------- |
+| 两张表       | `profiles`（用户资料）、`project_members`（谁在哪个项目、什么角色） | SQL 第 1、2 节 |
+| 三个触发器     | 注册即建资料、建项目即成为 owner、`updated_at` 自动更新           | SQL 第 3 节   |
+| 一套 RLS 策略 | 决定"谁能看到哪些行、谁能改哪些行"                              | SQL 第 5、6 节 |
 
 外加四个判定函数（第 4 节）和一个加成员的 RPC。
 
@@ -43,24 +43,24 @@ docs/sql/02-auth.sql     -- 认证、角色、全部策略
 
 四个角色，够用且不过度设计：
 
-| 角色 | 定位 |
-|---|---|
-| `owner` | 项目创建者。唯一，可以转让 |
-| `admin` | 可以改项目信息、管成员 |
-| `member` | 日常使用者：改问题库、触发采集、看数据 |
+| 角色       | 定位                    |
+| -------- | --------------------- |
+| `owner`  | 项目创建者。唯一，可以转让         |
+| `admin`  | 可以改项目信息、管成员           |
+| `member` | 日常使用者：改问题库、触发采集、看数据   |
 | `viewer` | 只看数据，不能改任何东西（给客户看报表用） |
 
 ### 1.2 权限矩阵
 
-| 操作 | owner | admin | member | viewer | 谁都不能 |
-|---|---|---|---|---|---|
-| 看看板、信源、雷达 | ✅ | ✅ | ✅ | ✅ | |
-| 看回答原文、提及明细 | ✅ | ✅ | ✅ | ✅ | |
-| 改问题库（增删改问题） | ✅ | ✅ | ✅ | ❌ | |
-| 触发采集 | ✅ | ✅ | ✅ | ❌ | |
-| 改项目信息（品牌、竞品、别名） | ✅ | ✅ | ❌ | ❌ | |
-| 加/删成员、改角色 | ✅ | ✅ | ❌ | ❌ | |
-| 写 `responses` / `mentions` / `daily_metrics` | | | | | **只有 service_role** |
+| 操作                                           | owner | admin | member | viewer | 谁都不能                |
+| -------------------------------------------- | ----- | ----- | ------ | ------ | ------------------- |
+| 看看板、信源、雷达                                    | ✅     | ✅     | ✅      | ✅      |                     |
+| 看回答原文、提及明细                                   | ✅     | ✅     | ✅      | ✅      |                     |
+| 改问题库（增删改问题）                                  | ✅     | ✅     | ✅      | ❌      |                     |
+| 触发采集                                         | ✅     | ✅     | ✅      | ❌      |                     |
+| 改项目信息（品牌、竞品、别名）                              | ✅     | ✅     | ❌      | ❌      |                     |
+| 加/删成员、改角色                                    | ✅     | ✅     | ❌      | ❌      |                     |
+| 写 `responses` / `mentions` / `daily_metrics` |       |       |        |        | **只有 service_role** |
 
 最后一行是这套设计的核心：**采集结果任何人都不能通过前端写**。人只能在问题库里定义"问什么"，答案只能由采集器写进去。这样看板上的数字才有意义。
 
@@ -119,11 +119,11 @@ alter table public.projects alter column created_by set default auth.uid();
 
 ## 3. 三个触发器
 
-| 触发器 | 时机 | 做什么 |
-|---|---|---|
-| `on_auth_user_created` | 注册成功后 | 往 `profiles` 插一行 |
-| `on_project_created` | 建项目后 | 把创建者写成该项目的 `owner` |
-| `trg_profiles_touch` | 改 profile 前 | 更新 `updated_at` |
+| 触发器                    | 时机          | 做什么                |
+| ---------------------- | ----------- | ------------------ |
+| `on_auth_user_created` | 注册成功后       | 往 `profiles` 插一行   |
+| `on_project_created`   | 建项目后        | 把创建者写成该项目的 `owner` |
+| `trg_profiles_touch`   | 改 profile 前 | 更新 `updated_at`    |
 
 第一个的完整实现：
 
@@ -196,12 +196,12 @@ $$;
 
 四个函数：
 
-| 函数 | 返回 | 被谁用 |
-|---|---|---|
-| `is_project_member(project_id)` | 是不是成员（任何角色） | 所有"读"策略 |
-| `can_write(project_id)` | 角色 ∈ owner/admin/member | 问题库写策略 |
-| `can_admin(project_id)` | 角色 ∈ owner/admin | 项目改删、成员管理 |
-| `shares_project(user_id)` | 和某人是否同项目 | 读别人的 profile |
+| 函数                              | 返回                      | 被谁用          |
+| ------------------------------- | ----------------------- | ------------ |
+| `is_project_member(project_id)` | 是不是成员（任何角色）             | 所有"读"策略      |
+| `can_write(project_id)`         | 角色 ∈ owner/admin/member | 问题库写策略       |
+| `can_admin(project_id)`         | 角色 ∈ owner/admin        | 项目改删、成员管理    |
+| `shares_project(user_id)`       | 和某人是否同项目                | 读别人的 profile |
 
 还有一个 RPC 函数 `add_member_by_email`，见第 6 节。
 
@@ -211,16 +211,16 @@ $$;
 
 完整 SQL 在 `docs/sql/02-auth.sql` 第 6 节，这里给逻辑映射。每条策略都是 `to authenticated`，匿名用户完全进不来。
 
-| 表 | SELECT | INSERT | UPDATE | DELETE |
-|---|---|---|---|---|
-| `profiles` | 自己 + 同项目成员 | 由触发器写，前端不插 | 只能改自己 | 不给 |
-| `projects` | 成员 | `created_by = auth.uid()` | `can_admin` | `can_admin` |
-| `project_members` | 成员 | `can_admin` | `can_admin` | `can_admin` 且不是自己 |
-| `prompts` | 成员 | `can_write` | `can_write` | `can_write` |
-| `runs` | 成员 | **无策略** | 无 | 无 |
-| `responses` | 成员 | **无策略** | 无 | 无 |
-| `mentions` | 成员 | **无策略** | 无 | 无 |
-| `daily_metrics` | 成员 | **无策略** | 无 | 无 |
+| 表                 | SELECT     | INSERT                    | UPDATE      | DELETE            |
+| ----------------- | ---------- | ------------------------- | ----------- | ----------------- |
+| `profiles`        | 自己 + 同项目成员 | 由触发器写，前端不插                | 只能改自己       | 不给                |
+| `projects`        | 成员         | `created_by = auth.uid()` | `can_admin` | `can_admin`       |
+| `project_members` | 成员         | `can_admin`               | `can_admin` | `can_admin` 且不是自己 |
+| `prompts`         | 成员         | `can_write`               | `can_write` | `can_write`       |
+| `runs`            | 成员         | **无策略**                   | 无           | 无                 |
+| `responses`       | 成员         | **无策略**                   | 无           | 无                 |
+| `mentions`        | 成员         | **无策略**                   | 无           | 无                 |
+| `daily_metrics`   | 成员         | **无策略**                   | 无           | 无                 |
 
 "无策略"的意思不是报错，是**该角色什么都做不了**——`authenticated` 读得到，写不进去。写只有 `service_role` 能做，而 `service_role` 绕过所有 RLS，所以采集器不需要任何策略。
 
@@ -362,12 +362,12 @@ await supabase.auth.resetPasswordForEmail(email, {
 
 ## 8. Supabase 控制台必改的四个设置
 
-| 位置 | 改什么 | 为什么 |
-|---|---|---|
-| Authentication → Sign In / Providers → Email | 关掉 **Confirm email** | 内部工具，注册后还要去邮箱点确认太麻烦。关掉后 `signUp` 直接返回 session |
-| Authentication → Sign In / Providers | 决定是否关掉 **Allow new users to sign up** | 关了就只能由管理员在后台建账号，内部工具推荐关 |
-| Authentication → URL Configuration | **Site URL** 填正式域名，**Redirect URLs** 加 `http://localhost:3000/**` 和正式域名 | 不改的话找回密码链接跳错站 |
-| Project Settings → API | 如果生成过 `service_role`，**轮换一次** | 那个 key 一旦贴到聊天里就等于作废了 |
+| 位置                                           | 改什么                                                                     | 为什么                                           |
+| -------------------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------- |
+| Authentication → Sign In / Providers → Email | 关掉 **Confirm email**                                                    | 内部工具，注册后还要去邮箱点确认太麻烦。关掉后 `signUp` 直接返回 session |
+| Authentication → Sign In / Providers         | 决定是否关掉 **Allow new users to sign up**                                   | 关了就只能由管理员在后台建账号，内部工具推荐关                       |
+| Authentication → URL Configuration           | **Site URL** 填正式域名，**Redirect URLs** 加 `http://localhost:3000/**` 和正式域名 | 不改的话找回密码链接跳错站                                 |
+| Project Settings → API                       | 如果生成过 `service_role`，**轮换一次**                                           | 那个 key 一旦贴到聊天里就等于作废了                          |
 
 第一条尤其重要：**没关 Confirm email 的话，注册完 `signUp` 返回的 `session` 是 `null`**，前端会以为注册失败。
 
@@ -378,6 +378,8 @@ await supabase.auth.resetPasswordForEmail(email, {
 `04` 第 5 节那套是"未登录、匿名可读"，现在全部推翻。执行 `02-auth.sql` 时会自动做掉，但要理解为什么：
 
 1. **`revoke all ... from anon`** —— Supabase 新建表默认给 `anon` 授权，不显式收回，匿名用户照样读得到全部数据。
+
+
 2. **视图必须 `security_invoker = true`** —— 这是最容易漏的一条。视图默认以"视图所有者"权限执行，**会绕过底层表的 RLS**。不加这一句，你给 `daily_metrics` 加了成员限制，但任何人查 `v_metric_cards` 还是能看到所有项目的数据。加了之后视图按查询者权限执行，底层 RLS 才生效。
 3. **`grant select ... to authenticated`** —— 登录用户需要显式授权，`revoke` 之后不补就没有权限。
 
