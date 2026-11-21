@@ -25,6 +25,7 @@ class CollectAccepted(BaseModel):
     """采集是异步的，这里只确认已排上队，进度看 runs。"""
 
     project_id: uuid.UUID
+    run_id: uuid.UUID = Field(description="本次采集的批次 id，用它轮询运行记录")
     engines: list[str]
     max_prompts: int
     message: str = "采集已开始，进度可查询运行记录"

@@ -29,3 +29,24 @@ def test_unknown_route_uses_unified_envelope(client: TestClient) -> None:
     body = response.json()
     assert body["code"] == "http_404"
     assert "request_id" in body
+
+
+def test_ready_reports_dependency_checks(client: TestClient) -> None:
+    response = client.get("/api/v1/ready")
+
+    body = response.json()
+    checks = body["data"]["checks"]
+    assert "database" in checks
+    assert "schema" in checks
+    assert "auth" in checks
+    # 表没建的环境要返回 503，不能假报就绪骗过负载均衡
+    assert response.status_code in (200, 503)
+    assert body["data"]["ready"] is (response.status_code == 200)
+
+
+def test_ready_does_not_leak_secrets(client: TestClient) -> None:
+    text = client.get("/api/v1/ready").text
+
+    assert "api_key" not in text.lower()
+    assert "password" not in text.lower()
+    assert "postgresql" not in text.lower()

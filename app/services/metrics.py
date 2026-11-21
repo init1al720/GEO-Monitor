@@ -23,6 +23,7 @@ from decimal import Decimal
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clock import day_window
 from app.core.logging import get_logger
 from app.models.geo import DailyMetric, Mention, Project, Response, Run
 from app.services.analyzer import own_domain_hit
@@ -79,13 +80,17 @@ async def recompute(
     if project is None:
         raise ValueError(f"项目不存在：{project_id}")
 
+    # 用业务时区的时间区间筛，不用 date(called_at)：函数套在列上走不了索引，
+    # 而且看起来是"当天"的数据其实按 UTC 切的天，中国客户会差 8 小时
+    window_start, window_end = day_window(metric_date)
     stmt = (
         sa.select(Response)
         .join(Run, Run.id == Response.run_id)
         .where(
             Run.project_id == project_id,
             Response.status == "success",
-            sa.func.date(Response.called_at) == metric_date,
+            Response.called_at >= window_start,
+            Response.called_at < window_end,
         )
     )
     if engine is not None:

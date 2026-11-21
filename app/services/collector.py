@@ -15,14 +15,15 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import sqlalchemy as sa
 
+from app.core.clock import business_date
 from app.core.config import get_settings
 from app.core.db import session_scope
 from app.core.logging import get_logger
-from app.engines import EngineAnswer, build_client
+from app.engines import EngineAnswer, EngineClient, build_client
 from app.engines.base import ResponseStatus
 from app.models.geo import Mention, Project, Prompt, Response, Run
 from app.services.analyzer import analyze, extract_domains
@@ -49,11 +50,16 @@ def _now() -> datetime:
 async def run_once(
     project_id: uuid.UUID,
     *,
+    run_id: uuid.UUID | None = None,
     engines: list[str] | None = None,
     max_prompts: int | None = None,
     dry_run: bool = False,
 ) -> RunResult:
-    """跑一轮采集。dry_run=True 只调引擎、不写库，用来验证密钥和网络。"""
+    """跑一轮采集。dry_run=True 只调引擎、不写库，用来验证密钥和网络。
+
+    传 run_id 时复用调用方已经落库的那条 pending 记录（接口层先建再排后台，
+    这样并发的第二个请求能查到它，不会重复触发）。
+    """
     settings = get_settings()
 
     async with session_scope() as session:
@@ -80,28 +86,48 @@ async def run_once(
             raise ValueError("没有配置任何引擎密钥，先填 DEEPSEEK_API_KEY 之类的环境变量")
 
         result = RunResult(run_id=None, prompt_count=len(prompts), engine_count=len(engine_names))
+
+        run: Run | None = None
+        if run_id is not None and not dry_run:
+            run = await session.get(Run, run_id)
+            if run is None or run.project_id != project_id:
+                raise ValueError(f"run 不存在或不属于该项目：{run_id}")
+            run.prompt_count = len(prompts)
+            run.engine_count = len(engine_names)
+            run.status = "running"
+            run.started_at = _now()
+        elif not dry_run:
+            run = Run(
+                project_id=project_id,
+                status="running",
+                prompt_count=len(prompts),
+                engine_count=len(engine_names),
+                started_at=_now(),
+            )
+            session.add(run)
+
+        if run is not None:
+            await session.flush()
+            result.run_id = run.id
+
         logger.info(
-            "开始采集 | 项目 %s | %s 个问题 × %s 个引擎（%s）",
+            "开始采集 | 项目 %s | run %s | %s 个问题 × %s 个引擎（%s）",
             project.name,
+            result.run_id,
             len(prompts),
             len(engine_names),
             ",".join(engine_names),
         )
 
-        run = Run(
-            project_id=project_id,
-            status="pending",
-            prompt_count=len(prompts),
-            engine_count=len(engine_names),
-        )
-        if not dry_run:
-            session.add(run)
-            await session.flush()
-            result.run_id = run.id
-            run.status = "running"
-            run.started_at = _now()
+        # 先落一条 running，让前端和后端都能看到"已在跑"，
+        # 也避免采集过程中进程崩了却什么记录都没留下
+        if run is not None:
+            await session.commit()
 
-        answers = await _gather_answers(prompts, engine_names, settings.collect_concurrency)
+        answers, client_errors = await _gather_answers(
+            prompts, engine_names, settings.collect_concurrency
+        )
+        result.errors.extend(client_errors)
 
         if dry_run:
             result.status = "dry_run"
@@ -121,7 +147,13 @@ async def run_once(
                     result.success += 1
             return result
 
+        assert run is not None
+        affected_dates: set[date] = set()
+        pending: list[Response] = []
         for prompt, engine, answer in answers:
+            called_at = _now()
+            # 按业务时区归日，不是 UTC：晚上跑完的采集该算今天
+            affected_dates.add(business_date(called_at))
             response = Response(
                 run_id=run.id,
                 prompt_id=prompt.id,
@@ -135,26 +167,36 @@ async def run_once(
                 tokens_in=answer.tokens_in,
                 tokens_out=answer.tokens_out,
                 cost_usd=answer.cost_usd,
-                called_at=_now(),
+                called_at=called_at,
             )
             session.add(response)
-            await session.flush()
+            pending.append(response)
 
             if response.status == ResponseStatus.SUCCESS.value:
                 result.success += 1
-                session.add_all(_build_mentions(project, response))
             else:
                 result.failed += 1
                 result.errors.append(f"{engine}/{prompt.text[:12]}: {answer.error}")
             if answer.cost_usd:
                 result.cost_usd += float(answer.cost_usd)
 
+        # 一次 flush 批量插入全部回答，再统一插入提及。
+        # 原来每条 flush 一次，70 条回答要 70 个数据库往返；
+        # 连线上 Postgres（Session pooler 走公网）时这部分能占掉大半写入耗时。
+        await session.flush()
+        for response in pending:
+            if response.status == ResponseStatus.SUCCESS.value:
+                session.add_all(_build_mentions(project, response))
+        await session.flush()
+
         run.finished_at = _now()
-        if result.failed == 0:
-            run.status = "success"
-        elif result.success == 0:
+        if result.success == 0:
+            # 一条都没成功：全失败，或者引擎客户端一个都没建起来（answers 为空）。
+            # 后一种情况 failed 也是 0，不能因为 failed==0 就标成功
             run.status = "failed"
-            run.error = "; ".join(result.errors[:3])[:1000]
+            run.error = "; ".join(result.errors[:3])[:1000] or "没有任何回答产生"
+        elif result.failed == 0:
+            run.status = "success"
         else:
             run.status = "partial"
             run.error = "; ".join(result.errors[:3])[:1000]
@@ -167,6 +209,21 @@ async def run_once(
             result.failed,
             result.cost_usd,
         )
+
+        # 回答先落库：指标算错不该把花了钱的回答一起回滚
+        await session.commit()
+
+        if settings.collect_auto_metrics and result.success:
+            from app.services.metrics import recompute
+
+            for day in sorted(affected_dates):
+                try:
+                    rows = await recompute(session, project_id, day)
+                    logger.info("采集后自动重算 | %s | %s 行指标", day, len(rows))
+                except Exception:  # noqa: BLE001 - 指标失败不影响本次采集结果
+                    logger.exception("采集后自动重算失败 | 项目 %s | %s", project_id, day)
+                    await session.rollback()
+
         return result
 
 
@@ -178,27 +235,53 @@ def _configured_engines() -> list[str]:
 
 async def _gather_answers(
     prompts: list[Prompt], engine_names: list[str], concurrency: int
-) -> list[tuple[Prompt, str, EngineAnswer]]:
-    """并发调用引擎，返回与输入同序的结果列表。"""
+) -> tuple[list[tuple[Prompt, str, EngineAnswer]], list[str]]:
+    """并发调用引擎，返回 (与输入同序的结果列表, 客户端初始化错误)。
+
+    客户端按引擎各建一个复用：原来每个「问题 × 引擎」都新建一个 AsyncClient，
+    60 个回答就是 60 次 TLS 握手，连接池完全没起作用，还容易撞上游的连接数限制。
+    """
+    clients: dict[str, EngineClient] = {}
+    errors: list[str] = []
+    for name in engine_names:
+        try:
+            clients[name] = build_client(name)
+        except Exception as exc:  # noqa: BLE001 - 一家配错不该废掉整轮
+            errors.append(f"{name}: 初始化失败 {exc}")
+            logger.warning("引擎客户端初始化失败，跳过 | %s | %s", name, exc)
+
+    usable = [name for name in engine_names if name in clients]
+    if not usable:
+        return [], errors
+
     semaphore = asyncio.Semaphore(max(1, concurrency))
 
     async def one(prompt: Prompt, engine_name: str) -> tuple[Prompt, str, EngineAnswer]:
-        client = build_client(engine_name)
+        client = clients[engine_name]
         try:
             async with semaphore:
-                answer = await client.ask(prompt.text)
+                return prompt, engine_name, await client.ask(prompt.text)
         except Exception as exc:  # 兜底：客户端本身炸了也要记一条
-            answer = EngineAnswer(
-                engine=engine_name,
-                status=ResponseStatus.ERROR,
-                error=f"客户端异常：{exc}",
+            return (
+                prompt,
+                engine_name,
+                EngineAnswer(
+                    engine=engine_name,
+                    status=ResponseStatus.ERROR,
+                    error=f"客户端异常：{exc}",
+                ),
             )
-        finally:
-            await client.aclose()
-        return prompt, engine_name, answer
 
-    tasks = [one(p, e) for p in prompts for e in engine_names]
-    return await asyncio.gather(*tasks)
+    tasks = [one(p, e) for p in prompts for e in usable]
+    try:
+        answers = await asyncio.gather(*tasks)
+    finally:
+        for name, client in clients.items():
+            try:
+                await client.aclose()
+            except Exception:  # noqa: BLE001 - 关连接失败不影响已有结果
+                logger.warning("关闭引擎连接失败 | %s", name)
+    return list(answers), errors
 
 
 def _build_mentions(project: Project, response: Response) -> list[Mention]:

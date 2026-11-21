@@ -4,11 +4,13 @@
     python -m app.cli engines                   # 看哪些引擎配了密钥
     python -m app.cli init                      # 本地 SQLite 建表（线上用 SQL 脚本）
     python -m app.cli seed                      # 演示项目 + 7 天示例回答 + 指标
-    python -m app.cli collect --project <id>    # 真采集一轮
+    python -m app.cli prompts --project <id>    # 看问题库 / 批量导入问题
+    python -m app.cli collect --project <id>    # 真采集一轮（自动重算指标）
     python -m app.cli metrics --project <id> --days 7
+    python -m app.cli stats --project <id>      # 用量、成本、成功率
     python -m app.cli reanalyze --run <id>      # 规则改了，重跑解析不重新采集
 
-生产上由 systemd timer 每天调用 collect + metrics，见 docs/02-deploy.md。
+生产上由 systemd timer 每天调用 collect，见 docs/02-deploy.md。
 """
 
 from __future__ import annotations
@@ -17,10 +19,13 @@ import argparse
 import asyncio
 import sys
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
+from pathlib import Path
 
 import sqlalchemy as sa
+from sqlalchemy import case
 
+from app.core.clock import business_today, day_window, report_tz
 from app.core.db import dispose_engine, session_scope
 from app.core.logging import get_logger, setup_logging
 from app.models.geo import DailyMetric, Mention, Project, Prompt, Response, Run
@@ -146,7 +151,7 @@ async def cmd_collect(args: argparse.Namespace) -> int:
         from app.services.metrics import recompute
 
         async with session_scope() as session:
-            rows = await recompute(session, project_id, datetime.now(UTC).date())
+            rows = await recompute(session, project_id, business_today())
         print(f"已重算当天指标 {len(rows)} 行")
     return 0 if result.status in {"success", "partial"} else 1
 
@@ -158,7 +163,7 @@ async def cmd_metrics(args: argparse.Namespace) -> int:
     if args.date:
         days = [date.fromisoformat(args.date)]
     else:
-        today = datetime.now(UTC).date()
+        today = business_today()
         days = [today - timedelta(days=i) for i in range(args.days - 1, -1, -1)]
 
     total = 0
@@ -176,6 +181,156 @@ async def cmd_reanalyze(args: argparse.Namespace) -> int:
 
     count = await analyze_run(uuid.UUID(args.run))
     print(f"重跑解析完成，生成 {count} 条提及")
+    return 0
+
+
+def _read_prompt_lines(path_str: str) -> list[str]:
+    """读问题库文本：一行一个问题，# 开头是注释，空行忽略。
+
+    放在同步函数里读文件：CLI 是一次性进程，几毫秒的阻塞读不影响任何东西，
+    异步函数里做文件 IO 反而会触发 lint 的 blocking-call 规则。
+    """
+    path = Path(path_str)
+    if not path.exists():
+        raise SystemExit(f"文件不存在：{path}")
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+async def cmd_prompts(args: argparse.Namespace) -> int:
+    """查看问题库，或从文本文件批量导入。
+
+    真实客户的问题库通常有 20~50 条，一条条用 SQL 插不现实。
+    """
+    project_id = await _resolve_project(args.project)
+
+    texts: list[str] = []
+    if args.add:
+        texts.append(args.add.strip())
+    if args.file:
+        texts.extend(_read_prompt_lines(args.file))
+
+    async with session_scope() as session:
+        if texts:
+            existing = set(
+                (
+                    await session.scalars(
+                        sa.select(Prompt.text).where(Prompt.project_id == project_id)
+                    )
+                ).all()
+            )
+            added = skipped = 0
+            for text in texts:
+                if text in existing:
+                    skipped += 1
+                    continue
+                session.add(
+                    Prompt(project_id=project_id, text=text, category=args.category or None)
+                )
+                existing.add(text)
+                added += 1
+            print(f"新增 {added} 条，跳过重复 {skipped} 条")
+
+        rows = list(
+            (
+                await session.scalars(
+                    sa.select(Prompt)
+                    .where(Prompt.project_id == project_id)
+                    .order_by(Prompt.created_at)
+                )
+            ).all()
+        )
+        if not rows:
+            print('问题库是空的。用 --file qs.txt 或 --add "问题" 导入')
+            return 1
+
+        print(f"共 {len(rows)} 条，启用 {sum(1 for r in rows if r.enabled)} 条：")
+        for i, row in enumerate(rows, 1):
+            mark = "✓" if row.enabled else "✗"
+            print(f"  {i:2d}. {mark} [{row.category or '-':8s}] {row.text}")
+    return 0
+
+
+async def cmd_stats(args: argparse.Namespace) -> int:
+    """用量与成本统计：每天回答数、成功率、token、花费。
+
+    逐天用业务时区的时间区间查，而不是 group by date(called_at)：
+    后者按 UTC 切天，国内客户看到的日报会错位 8 小时。
+    """
+    project_id = await _resolve_project(args.project)
+    today = business_today()
+    days = [today - timedelta(days=i) for i in range(args.days - 1, -1, -1)]
+
+    print(f"最近 {args.days} 天用量（项目 {project_id}，时区 {report_tz().key}）")
+    print(f"  {'日期':12s}{'回答':>6s}{'成功':>6s}{'成功率':>8s}{'tokens':>10s}{'成本 USD':>10s}")
+
+    total_cost = total_tokens = total_resp = total_ok = 0
+    async with session_scope() as session:
+        for day in days:
+            start, end = day_window(day)
+            row = (
+                await session.execute(
+                    sa.select(
+                        sa.func.count().label("total"),
+                        sa.func.sum(case((Response.status == "success", 1), else_=0)).label("ok"),
+                        sa.func.sum(
+                            sa.func.coalesce(Response.tokens_in, 0)
+                            + sa.func.coalesce(Response.tokens_out, 0)
+                        ).label("tokens"),
+                        sa.func.sum(sa.func.coalesce(Response.cost_usd, 0)).label("cost"),
+                    )
+                    .join(Run, Run.id == Response.run_id)
+                    .where(
+                        Run.project_id == project_id,
+                        Response.called_at >= start,
+                        Response.called_at < end,
+                    )
+                )
+            ).one()
+            if not row.total:
+                continue
+            rate = f"{(row.ok or 0) / row.total:.0%}"
+            print(
+                f"  {str(day):12s}{row.total:>6d}{row.ok or 0:>6d}{rate:>8s}"
+                f"{int(row.tokens or 0):>10d}{float(row.cost or 0):>10.4f}"
+            )
+            total_cost += float(row.cost or 0)
+            total_tokens += int(row.tokens or 0)
+            total_resp += int(row.total)
+            total_ok += int(row.ok or 0)
+
+        mentions = await session.scalar(
+            sa.select(sa.func.count())
+            .select_from(Mention)
+            .join(Response, Response.id == Mention.response_id)
+            .join(Run, Run.id == Response.run_id)
+            .where(Run.project_id == project_id, Mention.is_own.is_(True))
+        )
+        runs = (
+            await session.execute(
+                sa.select(Run.status, sa.func.count())
+                .where(Run.project_id == project_id)
+                .group_by(Run.status)
+            )
+        ).all()
+
+    if not total_resp:
+        print("\n这段时间没有采集记录")
+        return 0
+
+    rate = f"{total_ok / total_resp:.0%}" if total_resp else "-"
+    print(
+        f"  {'合计':12s}{total_resp:>6d}{total_ok:>6d}{rate:>8s}"
+        f"{total_tokens:>10d}{total_cost:>10.4f}"
+    )
+    print(f"\n自家品牌提及：{mentions} 条")
+    if runs:
+        print("采集批次：" + "，".join(f"{status} {count}" for status, count in sorted(runs)))
+    else:
+        print("采集批次：无")
     return 0
 
 
@@ -203,7 +358,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_collect.add_argument("--engines", default="", help="逗号分隔，默认所有已配置引擎")
     p_collect.add_argument("--limit", type=int, default=None, help="最多跑几个问题")
     p_collect.add_argument("--dry-run", action="store_true", help="只调引擎不写库")
-    p_collect.add_argument("--metrics", action="store_true", help="采集完立刻重算当天指标")
+    p_collect.add_argument(
+        "--metrics", action="store_true", help="采集完重算当天指标（服务端默认已自动重算）"
+    )
     p_collect.set_defaults(func=cmd_collect)
 
     p_metrics = sub.add_parser("metrics", help="重算指标")
@@ -211,6 +368,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_metrics.add_argument("--date", default="", help="指定日期 YYYY-MM-DD")
     p_metrics.add_argument("--days", type=int, default=1, help="从今天往前算几天")
     p_metrics.set_defaults(func=cmd_metrics)
+
+    p_prompts = sub.add_parser("prompts", help="查看或导入问题库")
+    p_prompts.add_argument("--project", required=True, help="项目 id 或项目名")
+    p_prompts.add_argument("--file", default="", help="每行一个问题的文本文件")
+    p_prompts.add_argument("--add", default="", help="直接加一条问题")
+    p_prompts.add_argument("--category", default="", help="导入时统一打的分组标签")
+    p_prompts.set_defaults(func=cmd_prompts)
+
+    p_stats = sub.add_parser("stats", help="最近 N 天的用量、成本与成功率")
+    p_stats.add_argument("--project", required=True, help="项目 id 或项目名")
+    p_stats.add_argument("--days", type=int, default=7, help="统计最近几天（默认 7）")
+    p_stats.set_defaults(func=cmd_stats)
 
     p_rea = sub.add_parser("reanalyze", help="对已有 run 重跑提及解析")
     p_rea.add_argument("--run", required=True, help="run id")

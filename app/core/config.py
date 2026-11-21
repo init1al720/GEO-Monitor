@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     env: Env = "local"
     debug: bool = False
+    # 报告口径的时区：daily_metrics.metric_date 按这个时区切天，
+    # 落库的 called_at 始终是 UTC。服务国内客户用 Asia/Shanghai。
+    report_timezone: str = "Asia/Shanghai"
 
     # HTTP
     host: str = "0.0.0.0"
@@ -36,9 +39,18 @@ class Settings(BaseSettings):
     log_json: bool = True
 
     # ---------- 数据库（Supabase Postgres；本地可用 SQLite） ----------
-    # 形如 postgresql+asyncpg://postgres:<密码>@db.xxx.supabase.co:5432/postgres
+    # Supabase 直连（IPv4 网络可直连，IPv6 only 环境会 ENETUNREACH）：
+    #   postgresql+asyncpg://postgres:<密码>@db.xxx.supabase.co:5432/postgres
+    # Session pooler（推荐，服务器环境用它）：
+    #   postgresql+asyncpg://postgres.<ref>:<密码>@aws-0-<region>.pooler.supabase.com:5432/postgres
     database_url: str = "sqlite+aiosqlite:///./data/geo.db"
     db_echo: bool = False
+    # SSL 模式。留空则自动判断：远程 Postgres 用 require，本地 SQLite/127.0.0.1 不加密。
+    # 显式写进 database_url 的 ?sslmode= 会被自动翻译成 asyncpg 认识的参数。
+    db_ssl: str = ""
+    # 连接池。Session pooler 的连接数有上限（免费档通常 15），别设太大。
+    db_pool_size: int = 3
+    db_max_overflow: int = 2
 
     # ---------- 采集 ----------
     # 每次采集的并发上限，各家引擎的限流不同，先保守取 3
@@ -51,6 +63,11 @@ class Settings(BaseSettings):
     engine_retry_base_seconds: float = 30.0
     # 单次 run 的问题数上限，防止误操作一次打出几百个请求
     collect_max_prompts: int = 50
+    # 采集成功后自动重算当天指标。关掉的话看板数字要等手动重算才更新
+    collect_auto_metrics: bool = True
+    # 超过这个分钟数还停在 pending/running 的 run 视为僵尸（进程重启、机器重启），
+    # 不再阻塞新的采集。要大于最坏情况耗时：问题数 × 重试次数 × 退避总和
+    collect_stale_minutes: int = 180
 
     # 引擎密钥，按需填写；未填写的引擎在采集时会被跳过
     deepseek_api_key: str = ""

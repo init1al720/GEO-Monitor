@@ -49,6 +49,9 @@ class EngineAnswer:
     cost_usd: float | None = None
     error: str | None = None
     attempts: int = 1
+    # 这次失败值不值得重试。限流、5xx、超时要重试；参数写错、模型名不存在、
+    # 鉴权失败重试一万次也一样，白等几分钟还占着并发位
+    retryable: bool = False
     meta: dict[str, Any] = field(default_factory=dict)
 
 

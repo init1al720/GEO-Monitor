@@ -10,6 +10,7 @@ POST /chat/completions，差别只在 base_url、model 和密钥，所以共用�
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from typing import Any
 
@@ -62,12 +63,20 @@ class OpenAICompatClient:
         last: EngineAnswer | None = None
         for attempt in range(1, self._max_attempts + 1):
             last = await self._attempt(question, attempt)
-            if last.status not in {ResponseStatus.TIMEOUT, ResponseStatus.ERROR}:
+            if not last.retryable:
                 return last
             if attempt < self._max_attempts:
-                wait = self._retry_base * (4 ** (attempt - 1))
+                # 429 通常带 Retry-After，按服务端说的等；否则指数退避
+                hinted = last.meta.get("retry_after")
+                wait = (
+                    float(hinted)
+                    if isinstance(hinted, int | float) and hinted > 0
+                    else self._retry_base * (4 ** (attempt - 1))
+                )
+                # 加抖动：多个采集进程同时撞上限流时，避免同一秒一起重试
+                wait *= random.uniform(0.85, 1.15)
                 logger.warning(
-                    "引擎调用失败，%ss 后重试 | %s | 第 %s/%s 次 | %s",
+                    "引擎调用失败，%.0fs 后重试 | %s | 第 %s/%s 次 | %s",
                     wait,
                     self.name,
                     attempt,
@@ -95,6 +104,7 @@ class OpenAICompatClient:
                 status=ResponseStatus.TIMEOUT,
                 error=f"超时（{self._timeout}s）：{exc}",
                 attempts=attempt,
+                retryable=True,
             )
         except httpx.HTTPError as exc:
             return EngineAnswer(
@@ -103,36 +113,44 @@ class OpenAICompatClient:
                 status=ResponseStatus.ERROR,
                 error=f"网络错误：{exc}",
                 attempts=attempt,
+                retryable=True,
             )
 
         elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        meta: dict[str, Any] = {"elapsed_ms": elapsed_ms}
 
         if resp.status_code in _BLOCKED_STATUS:
+            # 鉴权失败 / 欠费 / 封禁：重试没有意义，直接判死
             return EngineAnswer(
                 engine=self.name,
                 model=self.model,
                 status=ResponseStatus.BLOCKED,
                 error=f"HTTP {resp.status_code}：{_brief(resp)}",
                 attempts=attempt,
-                meta={"elapsed_ms": elapsed_ms},
+                meta=meta,
             )
         if resp.status_code in _RETRYABLE_STATUS:
+            retry_after = resp.headers.get("retry-after")
+            if retry_after and retry_after.isdigit():
+                meta["retry_after"] = int(retry_after)
             return EngineAnswer(
                 engine=self.name,
                 model=self.model,
                 status=ResponseStatus.ERROR,
                 error=f"HTTP {resp.status_code}：{_brief(resp)}",
                 attempts=attempt,
-                meta={"elapsed_ms": elapsed_ms},
+                retryable=True,
+                meta=meta,
             )
         if resp.status_code >= 400:
+            # 400 参数错、404 模型不存在、413 超长：改配置才能解决，不重试
             return EngineAnswer(
                 engine=self.name,
                 model=self.model,
                 status=ResponseStatus.ERROR,
                 error=f"HTTP {resp.status_code}：{_brief(resp)}",
                 attempts=attempt,
-                meta={"elapsed_ms": elapsed_ms},
+                meta=meta,
             )
 
         try:
@@ -144,7 +162,7 @@ class OpenAICompatClient:
                 status=ResponseStatus.ERROR,
                 error="返回不是合法 JSON",
                 attempts=attempt,
-                meta={"elapsed_ms": elapsed_ms, "body": resp.text[:500]},
+                meta={**meta, "body": resp.text[:500]},
             )
 
         return self._parse(data, attempt, elapsed_ms)

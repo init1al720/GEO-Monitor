@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import random
 import uuid
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clock import business_today, day_window
 from app.core.db import session_scope
 from app.core.logging import get_logger
 from app.models.geo import DailyMetric, Mention, Project, Prompt, Response, Run
@@ -150,7 +151,7 @@ async def seed_demo(
             logger.info("演示项目就绪（未灌样本）：%s", project.id)
             return project.id
 
-        today = datetime.now(UTC).date()
+        today = business_today()
         start = today - timedelta(days=days - 1)
 
         # 已有样本就整段重灌，避免同一份数据越叠越多
@@ -169,14 +170,18 @@ async def seed_demo(
         inserted = 0
         day = start
         while day <= today:
+            # 落在业务日的上午 10 点（北京时间），不是 UTC 凌晨——
+            # 指标按业务时区切天，放 UTC 2 点会归到前一天
+            day_start, _ = day_window(day)
+            run_at = day_start + timedelta(hours=10)
             for engine in ("deepseek", "qwen"):
                 run = Run(
                     project_id=project.id,
                     status="success",
                     prompt_count=len(prompts),
                     engine_count=1,
-                    started_at=datetime.combine(day, time(2, 0), tzinfo=UTC),
-                    finished_at=datetime.combine(day, time(2, 5), tzinfo=UTC),
+                    started_at=run_at,
+                    finished_at=run_at + timedelta(minutes=5),
                 )
                 session.add(run)
                 await session.flush()
@@ -201,7 +206,7 @@ async def seed_demo(
                         tokens_in=rng.randint(60, 120),
                         tokens_out=rng.randint(200, 500),
                         cost_usd=None,
-                        called_at=datetime.combine(day, time(2, 0), tzinfo=UTC),
+                        called_at=run_at,
                     )
                     session.add(response)
                     await session.flush()

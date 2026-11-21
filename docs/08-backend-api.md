@@ -138,6 +138,7 @@ curl -X POST http://localhost:8000/api/v1/projects/812a1c97.../collect \
   "code": "ok",
   "data": {
     "project_id": "812a1c97-...",
+    "run_id": "b3d9f0e2-...",
     "engines": ["deepseek", "qwen"],
     "max_prompts": 20,
     "message": "采集已开始，进度可查询运行记录"
@@ -145,11 +146,17 @@ curl -X POST http://localhost:8000/api/v1/projects/812a1c97.../collect \
 }
 ```
 
+`run_id` 是本次批次号。接口返回时这条记录已经落库（状态 `pending`），所以**立刻**用 `/runs` 就能看到它；采集开始时变 `running`，结束后变 `success` / `partial` / `failed`。
+
 **为什么是异步**：20 个问题 × 2 个引擎，串行要十几分钟，网关 60 秒就 504 了。接口只负责排队，进度让前端轮询 `/runs`。
 
-**防重复触发**：同一项目已有 `pending` / `running` 的 run 时返回 **409**，避免同一批问题重复计费。
+**防重复触发**：同一项目已有 `pending` / `running` 的批次时返回 **409**，避免同一批问题重复计费。批次记录是在接口里先落库、再排后台任务的，所以两个请求同时打进来也不会各排一轮。
 
-**限制**：后台任务跑在 API 进程内，进程重启会丢掉排队中的任务。生产上每天定时采集由 systemd timer 跑（`docs/02-deploy.md`），这个接口是给"手动补跑一次"用的，不是调度器。要多 worker 部署且需要任务可靠，得换 Celery / RQ 之类的队列。
+**僵尸批次**：进程重启会让批次永远停在 `running`。超过 `COLLECT_STALE_MINUTES`（默认 180）的批次会被自动标成 `failed` 并放行新采集，不会把项目锁死。后台任务自身抛异常时也会立刻把批次标 `failed`，不用等到超时。
+
+**采完自动算指标**：默认 `COLLECT_AUTO_METRICS=true`，采集结束后自动重算当天指标，前端刷新即见新数字，不用再手动调 `/metrics/recompute`。只有 `status=success` 的回答才进分母，所以引擎大面积失败时不会把指标拉低。
+
+**限制**：后台任务跑在 API 进程内，进程重启会丢掉排队中的任务（批次会被标 failed，不会卡住）。生产上每天定时采集由 systemd timer 跑（`docs/02-deploy.md`），这个接口是给"手动补跑一次"用的，不是调度器。要多 worker 部署且需要任务可靠，得换 Celery / RQ 之类的队列。
 
 ### 3.3 `POST /projects/{id}/metrics/recompute`
 
@@ -255,11 +262,18 @@ const me = await api('/auth/me')
 const role = me.projects.find((p) => p.id === currentProjectId)?.role
 const canCollect = ['owner', 'admin', 'member'].includes(role)
 
-// 4. 触发采集后轮询
-await api(`/projects/${currentProjectId}/collect`, { method: 'POST', body: '{}' })
+// 4. 触发采集后按 run_id 轮询（比"取最新一条"准，多人同时点不会串）
+const { run_id } = await api(`/projects/${currentProjectId}/collect`, {
+  method: 'POST',
+  body: '{}',
+})
 const timer = setInterval(async () => {
-  const [latest] = await api(`/projects/${currentProjectId}/runs?limit=1`)
-  if (latest.status !== 'running' && latest.status !== 'pending') clearInterval(timer)
+  const runs = await api(`/projects/${currentProjectId}/runs?limit=20`)
+  const mine = runs.find((r) => r.id === run_id)
+  if (mine && mine.status !== 'running' && mine.status !== 'pending') {
+    clearInterval(timer)
+    // 采集成功后指标已自动重算，直接重新拉指标视图即可
+  }
 }, 5000)
 ```
 
@@ -267,7 +281,68 @@ const timer = setInterval(async () => {
 
 ---
 
-## 7. 本地验证
+## 7. 探针与运维命令
+
+### 7.1 两个探针的分工
+
+| 路径 | 查什么 | 失败时 | 给谁用 |
+|---|---|---|---|
+| `/health` | 什么都不查，只证明进程活着 | 进程挂了才失败 | 负载均衡摘流量、容器存活探针 |
+| `/ready` | 数据库连通性、6 张表是否建齐、引擎与鉴权是否配置 | 返回 **503** | 上线前的自检、监控告警 |
+
+`/ready` 故意不查密钥内容，只回 `configured` / `not_configured`，也不会把连接串打进响应。示例：
+
+```json
+{
+  "code": "ok",
+  "data": {
+    "ready": true,
+    "checks": {
+      "database": "postgresql",
+      "schema": "ok",
+      "engines": "deepseek,qwen",
+      "auth": "configured"
+    }
+  }
+}
+```
+
+`schema` 不是 `ok` 时说明 SQL 脚本没跑完，此时采集一定失败——先跑 SQL，别急着看接口。
+
+### 7.2 命令行
+
+```bash
+python -m app.cli check                          # 连通性 + 各表行数（等同 /ready 的人工版）
+python -m app.cli prompts --project <id>          # 看问题库
+python -m app.cli prompts --project <id> --file qs.txt --category 选型   # 批量导入
+python -m app.cli stats --project <id> --days 7   # 每天回答数 / 成功率 / token / 成本
+python -m app.cli collect --project <id>          # 采集一轮（结束自动算指标）
+python -m app.cli reanalyze --run <id>            # 规则改了，只重跑解析，不花钱
+```
+
+`prompts --file` 的格式：一行一个问题，`#` 开头是注释，空行忽略，重复的自动跳过。
+
+```
+# qs.txt
+施工投标文件用什么软件制作比较好？
+建筑行业投标软件哪个性价比高？
+```
+
+`stats` 的输出用来判断"这个月花了多少、失败多不多"：
+
+```
+最近 7 天用量（项目 812a1c97...，时区 Asia/Shanghai）
+  日期              回答    成功     成功率    tokens    成本 USD
+  2026-11-16      10    10    100%      4017    0.0000
+  ...
+  合计              70    70    100%     31609    0.0000
+```
+
+日期按 `REPORT_TIMEZONE`（默认 `Asia/Shanghai`）切天，不是 UTC。
+
+---
+
+## 8. 本地验证
 
 ```bash
 # 1. 起服务
