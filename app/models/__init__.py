@@ -1,7 +1,16 @@
-"""ORM 模型层（目前未接数据库）。
+"""ORM 模型层。
 
-接入数据库时建议：
-1. 在 app/core/db.py 建异步 engine 与 session 工厂；
-2. 每个业务域一个文件，如 app/models/user.py，继承 Base；
-3. 用 Alembic 管理迁移，迁移脚本放 migrations/。
+每个业务域一个文件：
+
+- ``geo``  六张业务表：projects / prompts / runs / responses / mentions / daily_metrics
+- ``auth`` 认证层两张表：profiles / project_members
+
+这里集中 re-export，保证 ``Base.metadata.create_all`` 能看到全部表。
+线上这些表由 ``docs/sql/01-schema.sql`` 和 ``02-auth.sql`` 建，ORM 只做映射。
 """
+
+from __future__ import annotations
+
+from app.models import auth, geo
+
+__all__ = ["auth", "geo"]

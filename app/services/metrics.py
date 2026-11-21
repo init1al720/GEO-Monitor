@@ -70,8 +70,10 @@ async def recompute(
 ) -> list[DailyMetric]:
     """重算某项目某天的指标。
 
-    先删后插而不是 upsert：`engine` 为 null 时 Postgres 不认为两个 null 相等，
-    unique 约束挡不住重复行，upsert 会插出两份，看板数字就翻倍了。
+    先删后插而不是 upsert：`engine` 为 null 时 Postgres 默认不认为两个 null 相等，
+    线上已经用 `unique nulls not distinct` 兜住这一点（见 docs/sql/03-fixes.sql），
+    但本地 SQLite 不支持该语法，且 upsert 要写全 ON CONFLICT 的列，
+    保留「先删后插」在两个环境下行为一致，也更好读。
     """
     project = await session.get(Project, project_id)
     if project is None:

@@ -65,9 +65,29 @@ class Settings(BaseSettings):
     doubao_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     doubao_model: str = "doubao-pro-32k"
 
+    # ---------- Supabase 鉴权 ----------
+    # 项目地址，形如 https://xxxx.supabase.co（结尾不带斜杠）
+    supabase_url: str = ""
+    # 老项目 / 自建：Dashboard → Settings → API → JWT Secret，用于校验 HS256 签名
+    supabase_jwt_secret: str = ""
+    # 新项目默认用非对称签名（ES256/RS256），公钥从 JWKS 端点自动拉取，不需要 secret
+    # token 的 aud 声明，Supabase 固定是 authenticated
+    supabase_jwt_audience: str = "authenticated"
+
     @property
     def is_prod(self) -> bool:
         return self.env == "prod"
+
+    @property
+    def supabase_issuer(self) -> str:
+        """JWT 的 iss 声明。地址没配时返回空串，跳过 iss 校验。"""
+        url = self.supabase_url.rstrip("/")
+        return f"{url}/auth/v1" if url else ""
+
+    @property
+    def auth_configured(self) -> bool:
+        """能用 secret 校验 HS256，或用 url 拉 JWKS 校验非对称签名。"""
+        return bool(self.supabase_jwt_secret or self.supabase_url)
 
     @property
     def docs_enabled(self) -> bool:

@@ -18,6 +18,7 @@ GEO 优化监测平台后端 —— 监测品牌在生成式引擎（DeepSeek / 
 | [docs/05-auth-permission.md](docs/05-auth-permission.md) | 认证与权限：角色矩阵、RLS、触发器、前端登录代码 |
 | [docs/06-frontend-handoff.md](docs/06-frontend-handoff.md) | 发给前端的对接清单（SQL 执行步骤、控制台设置、排错） |
 | [docs/07-backend.md](docs/07-backend.md) | 采集与分析服务：结构、命令行、指标口径、加引擎、定时任务 |
+| [docs/08-backend-api.md](docs/08-backend-api.md) | 后端接口：Supabase JWT 校验、角色判定、采集触发/重算/运行记录 |
 | [docs/02-deploy.md](docs/02-deploy.md) | 服务器部署手册：Nginx + systemd + HTTPS + 更新回滚 |
 | [docs/03-github.md](docs/03-github.md) | GitHub 操作清单：建仓、权限、CI、部署密钥、协作规范 |
 
