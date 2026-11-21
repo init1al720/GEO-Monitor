@@ -12,6 +12,8 @@ GEO 优化监测平台（生成式引擎优化监测）。后端复用本仓库�
 | [03-github.md](./03-github.md) | GitHub 操作清单：建仓、权限、分支保护、CI、部署密钥、Actions、协作规范 | 双方 |
 | [04-supabase-contract.md](./04-supabase-contract.md) | **数据契约 v0.1（当前方案）**：6 张业务表 + 4 个视图 + 采集器契约 + 前端改造清单 | 双方 |
 | [05-auth-permission.md](./05-auth-permission.md) | **认证与权限 v0.1**：角色矩阵、RLS 策略、触发器、前端登录代码、控制台设置 | 双方 |
+| [06-frontend-handoff.md](./06-frontend-handoff.md) | **发给前端的对接清单**：三个 SQL 的执行步骤、控制台设置、验证查询、错误对照 | 前端 |
+| [07-backend.md](./07-backend.md) | **采集与分析服务 v0.1**：代码结构、命令行用法、指标口径、加引擎、定时任务、已知限制 | 后端 |
 | [sql/00-lock-write.sql](./sql/00-lock-write.sql) | **应急：关闭演示表的匿名写权限**（16 条语句，最先执行） | 后端 |
 | [sql/01-schema.sql](./sql/01-schema.sql) | 六张业务表 + 四个视图（17 条语句） | 后端 |
 | [sql/02-auth.sql](./sql/02-auth.sql) | 认证与权限全部 SQL（86 条语句，需在 `01` 之后执行） | 后端 |
@@ -49,7 +51,11 @@ GEO 优化监测平台（生成式引擎优化监测）。后端复用本仓库�
 - [x] 前端现状评审 + Supabase 数据契约 v0.1
 - [x] 认证与权限 v0.1（表 + 触发器 + RLS + RPC，SQL 已就绪待执行）
 - [x] 前端仓库评审（`Chenxqh/geo-monitor`，public，线上仅 3 张演示表、RLS 未开）
+- [x] 采集与分析服务 v0.1（6 张表模型、3 家引擎适配、提及分析、指标聚合、CLI、26 个测试）
 - [ ] 关闭演示表匿名写权限（`sql/00-lock-write.sql`，待对方在后台执行）
+- [ ] 建表建视图（`sql/01`、`sql/02`，待对方执行）
+- [ ] 第一次真实采集（需 `service_role` 或数据库连接串）
+- [ ] 定时采集（systemd timer）
 - [ ] W1：建表、视图、seed、前端接真视图
 - [ ] W2：采集链路
 - [ ] W3：指标聚合

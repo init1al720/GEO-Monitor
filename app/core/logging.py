@@ -53,6 +53,11 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
+def get_logger(name: str) -> logging.Logger:
+    """取 logger。统一从这里拿，将来换实现（比如换成 structlog）只改一处。"""
+    return logging.getLogger(name)
+
+
 def setup_logging() -> None:
     settings = get_settings()
     handler = logging.StreamHandler(sys.stdout)

@@ -520,8 +520,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.core.config import get_settings          # noqa: E402
-from app.models import Base                       # noqa: E402
+from app.core.config import get_settings  # noqa: E402
+from app.models import Base  # noqa: E402
 
 config = context.config
 config.set_main_option("sqlalchemy.url", get_settings().database_url)

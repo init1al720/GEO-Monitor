@@ -1,21 +1,44 @@
 # geo-backend
 
 GEO 优化监测平台后端 —— 监测品牌在生成式引擎（DeepSeek / 豆包 / 通义等）回答中的曝光情况。
-基于 FastAPI 基础框架搭建：分层分区、统一响应、统一异常、带链路追踪的日志与 CI 都已就位，
-新增业务模块时照 `app/api/v1/endpoints/example.py` 的写法填空即可。
 
-- 技术栈：Python 3.11+ / FastAPI / Pydantic v2 / SQLAlchemy(async) / Postgres / Uvicorn
-- 核心链路：问题库 × 引擎 → 采集原始回答 → 提及/位次分析 → 指标看板 → 导出
-- 已包含：多环境配置、统一响应信封、全局异常、JSON 日志 + request_id、GitHub Actions CI
+技术方案是 **Supabase 直连（BaaS）**，前端直接读视图，所以这里没有 REST 业务接口。本仓库负责三件事：
+**去各家引擎问问题 → 判断回答里提到了谁 → 算成每天的指标**，以及一套留着做运维与扩展的 FastAPI 骨架。
+
+- 技术栈：Python 3.11+ / SQLAlchemy 2（async）/ asyncpg / Supabase Postgres / httpx
+- 核心链路：问题库 × 引擎 → 采集原始回答 → 提及/位次分析 → 每日指标 → 看板视图 → 导出
+- 保留能力：多环境配置、统一响应信封、全局异常、JSON 日志 + request_id、GitHub Actions CI
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
 | [docs/00-basics.md](docs/00-basics.md) | 基础概念：CI、JWT、OpenAPI、数据库迁移、反向代理、systemd |
-| [docs/01-week1-plan.md](docs/01-week1-plan.md) | 第一周详细计划：接口契约、表结构、逐日任务、代码骨架、验收标准 |
-| [docs/02-deploy.md](docs/02-deploy.md) | 服务器部署手册：Nginx + systemd + Postgres + HTTPS + 更新回滚 |
+| [docs/04-supabase-contract.md](docs/04-supabase-contract.md) | 数据契约：6 张表 + 4 个视图 + 采集器契约（当前方案） |
+| [docs/05-auth-permission.md](docs/05-auth-permission.md) | 认证与权限：角色矩阵、RLS、触发器、前端登录代码 |
+| [docs/06-frontend-handoff.md](docs/06-frontend-handoff.md) | 发给前端的对接清单（SQL 执行步骤、控制台设置、排错） |
+| [docs/07-backend.md](docs/07-backend.md) | 采集与分析服务：结构、命令行、指标口径、加引擎、定时任务 |
+| [docs/02-deploy.md](docs/02-deploy.md) | 服务器部署手册：Nginx + systemd + HTTPS + 更新回滚 |
 | [docs/03-github.md](docs/03-github.md) | GitHub 操作清单：建仓、权限、CI、部署密钥、协作规范 |
+
+## 采集服务快速开始
+
+```bash
+pip install -e ".[dev]"
+
+# 本地演示：SQLite 建表 + 灌 7 天示例数据（不花钱，不需要任何 API key）
+python -m app.cli init
+python -m app.cli seed --days 7
+python -m app.cli check
+
+# 真采集（.env 里配好 DEEPSEEK_API_KEY / QWEN_API_KEY / DOUBAO_API_KEY）
+python -m app.cli collect --project 演示项目 --dry-run   # 只试跑不写库
+python -m app.cli collect --project 演示项目 --metrics   # 采集并算当天指标
+```
+
+线上把 `DATABASE_URL` 指向 Supabase，表由 `docs/sql/01-schema.sql` 建，不用 `cli init`。
+
+## 框架快速开始（保留的 FastAPI 骨架）
 
 ## 快速开始
 
@@ -47,35 +70,38 @@ uvicorn app.main:app --reload
 ```
 .
 ├─ app/
-│  ├─ main.py                    # 应用入口：组装中间件 / 异常处理 / 路由
+│  ├─ cli.py                     # 命令行入口：init / check / seed / collect / metrics / reanalyze
+│  ├─ main.py                    # FastAPI 入口（健康检查等运维接口保留）
 │  ├─ core/                      # 与业务无关的横切能力
 │  │  ├─ config.py               # 配置（环境变量 / .env，pydantic-settings）
+│  │  ├─ db.py                   # 异步 engine + session 工厂
 │  │  ├─ logging.py              # 日志初始化（文本 / JSON 两种格式）
 │  │  ├─ context.py              # request_id 上下文（ContextVar）
 │  │  ├─ middleware.py           # 请求 ID、耗时统计、访问日志
 │  │  ├─ exceptions.py           # 业务异常基类 + 全局异常处理器
 │  │  └─ response.py             # 统一响应体 ApiResponse / success / failure
-│  ├─ api/
-│  │  ├─ deps.py                 # 依赖注入出口（service、分页、鉴权预留）
-│  │  └─ v1/
-│  │     ├─ router.py            # 路由聚合：新模块在这里挂一行
-│  │     └─ endpoints/           # 一个业务域一个文件
-│  │        ├─ health.py         # /health、/ready
-│  │        └─ example.py        # 示例 CRUD（可整块删除）
-│  ├─ schemas/                   # Pydantic 出入参（接口契约）
-│  │  ├─ common.py               # 分页等通用模型
-│  │  └─ example.py
+│  ├─ engines/                   # 引擎适配层（加一家引擎只改这里）
+│  │  ├─ base.py                 # EngineClient 协议 + 统一结果 EngineAnswer
+│  │  ├─ openai_compat.py        # OpenAI 兼容实现（DeepSeek / 通义 / 豆包共用）
+│  │  └─ registry.py             # 引擎注册表：密钥、模型、计费单价
 │  ├─ services/                  # 业务逻辑：编排用例，不 import fastapi
-│  ├─ repositories/              # 数据访问层：SQL / 外部存储全部收在这里
-│  │  └─ base.py                 # 仓储接口骨架
-│  ├─ models/                    # ORM 模型（接库后填）
-│  └─ utils/                     # 纯工具函数（时间、加密、ID 生成）
-├─ tests/                        # pytest 用例
-├─ docs/                         # 计划、部署、协作文档
-│  ├─ 00-basics.md               # 基础概念（CI / JWT / 迁移 / 反代）
-│  ├─ 01-week1-plan.md           # 第一周计划与接口契约
-│  ├─ 02-deploy.md               # 服务器部署手册
-│  └─ 03-github.md               # GitHub 操作清单
+│  │  ├─ collector.py            # run_once：并发采集 → 落库 → 提及分析
+│  │  ├─ analyzer.py             # 品牌命中、位次、情绪、引用域名（纯函数）
+│  │  ├─ metrics.py              # 聚合 daily_metrics
+│  │  └─ seed.py                 # 演示数据
+│  ├─ models/                    # ORM 模型
+│  │  ├─ base.py                 # 声明式基类 + JSON 类型
+│  │  └─ geo.py                  # 6 张业务表
+│  ├─ api/v1/endpoints/          # 运维接口（health / ready / 示例）
+│  ├─ schemas/                   # Pydantic 出入参
+│  ├─ repositories/              # 数据访问骨架（当前业务走 services 里的 SQLAlchemy 查询）
+│  └─ utils/                     # 纯工具函数
+├─ tests/                        # pytest 用例（26 个）
+├─ docs/                         # 计划、契约、部署、协作文档（见上方表格）
+├─ docs/sql/                     # 可直接在 Supabase 执行的 SQL
+│  ├─ 00-lock-write.sql          # 应急：关掉演示表的匿名写权限
+│  ├─ 01-schema.sql              # 6 张业务表 + 4 个视图
+│  └─ 02-auth.sql                # 认证与权限（RLS / 触发器 / RPC）
 ├─ .github/workflows/ci.yml      # 提交即跑 lint + format + test
 ├─ .env.example                  # 环境变量模板（.env 不入库）
 ├─ .gitignore

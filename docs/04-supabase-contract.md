@@ -410,7 +410,7 @@ from supabase import create_client
 
 # service_role key，只在服务器环境变量里
 sb = create_client(
-    os.environ["SUPABASE_URL"],          # https://xxxx.supabase.co
+    os.environ["SUPABASE_URL"],  # https://xxxx.supabase.co
     os.environ["SUPABASE_SERVICE_KEY"],  # sb_secret_... 或 service_role JWT
 )
 ```
@@ -420,28 +420,53 @@ sb = create_client(
 ```python
 def run_once(project_id: str) -> str:
     # 1. 建任务
-    run = sb.table("runs").insert({
-        "project_id": project_id, "status": "running",
-        "started_at": now_iso(),
-    }).execute().data[0]
+    run = (
+        sb.table("runs")
+        .insert(
+            {
+                "project_id": project_id,
+                "status": "running",
+                "started_at": now_iso(),
+            }
+        )
+        .execute()
+        .data[0]
+    )
 
-    prompts = (sb.table("prompts").select("id,text")
-                 .eq("project_id", project_id).eq("enabled", True)
-                 .execute().data)
+    prompts = (
+        sb.table("prompts")
+        .select("id,text")
+        .eq("project_id", project_id)
+        .eq("enabled", True)
+        .execute()
+        .data
+    )
 
     ok = fail = 0
     for p in prompts:
         for engine in ("deepseek", "qwen"):
             try:
-                r = call_engine(engine, p["text"])       # 见 6.3
-                resp = sb.table("responses").insert({
-                    "run_id": run["id"], "prompt_id": p["id"],
-                    "engine": engine, "model": r.model,
-                    "question": p["text"], "answer_text": r.text,
-                    "raw_json": r.raw, "cited_domains": r.domains,
-                    "status": r.status, "tokens_in": r.in_tokens,
-                    "tokens_out": r.out_tokens,
-                }).execute().data[0]
+                r = call_engine(engine, p["text"])  # 见 6.3
+                resp = (
+                    sb.table("responses")
+                    .insert(
+                        {
+                            "run_id": run["id"],
+                            "prompt_id": p["id"],
+                            "engine": engine,
+                            "model": r.model,
+                            "question": p["text"],
+                            "answer_text": r.text,
+                            "raw_json": r.raw,
+                            "cited_domains": r.domains,
+                            "status": r.status,
+                            "tokens_in": r.in_tokens,
+                            "tokens_out": r.out_tokens,
+                        }
+                    )
+                    .execute()
+                    .data[0]
+                )
                 ok += 1
 
                 # 2. 解析品牌提及
@@ -450,19 +475,27 @@ def run_once(project_id: str) -> str:
                     sb.table("mentions").insert(m).execute()
             except Exception as e:
                 fail += 1
-                sb.table("responses").insert({
-                    "run_id": run["id"], "prompt_id": p["id"],
-                    "engine": engine, "question": p["text"],
-                    "status": "error", "answer_text": str(e)[:500],
-                }).execute()
+                sb.table("responses").insert(
+                    {
+                        "run_id": run["id"],
+                        "prompt_id": p["id"],
+                        "engine": engine,
+                        "question": p["text"],
+                        "status": "error",
+                        "answer_text": str(e)[:500],
+                    }
+                ).execute()
 
     # 3. 收尾
-    sb.table("runs").update({
-        "status": "success" if fail == 0 else "partial",
-        "finished_at": now_iso(),
-        "prompt_count": len(prompts), "engine_count": 2,
-        "error": f"{fail} 次调用失败" if fail else None,
-    }).eq("id", run["id"]).execute()
+    sb.table("runs").update(
+        {
+            "status": "success" if fail == 0 else "partial",
+            "finished_at": now_iso(),
+            "prompt_count": len(prompts),
+            "engine_count": 2,
+            "error": f"{fail} 次调用失败" if fail else None,
+        }
+    ).eq("id", run["id"]).execute()
 
     # 4. 算聚合
     recompute_daily(project_id, date.today())
@@ -482,8 +515,14 @@ def match_mentions(answer: str, project: dict) -> list[dict]:
         aliases = project["aliases"] if is_own else [name]
         pos = min((answer.find(a) for a in aliases if a in answer), default=-1)
         if pos >= 0:
-            hits.append({"_pos": pos, "brand": name, "is_own": is_own,
-                         "matched_term": next(a for a in aliases if a in answer)})
+            hits.append(
+                {
+                    "_pos": pos,
+                    "brand": name,
+                    "is_own": is_own,
+                    "matched_term": next(a for a in aliases if a in answer),
+                }
+            )
     hits.sort(key=lambda x: x["_pos"])
     for i, h in enumerate(hits, 1):
         h["position"] = i
@@ -504,8 +543,9 @@ def match_mentions(answer: str, project: dict) -> list[dict]:
 
 ```python
 def recompute_daily(project_id: str, d: date):
-    sb.table("daily_metrics").delete() \
-      .eq("project_id", project_id).eq("metric_date", d.isoformat()).execute()
+    sb.table("daily_metrics").delete().eq("project_id", project_id).eq(
+        "metric_date", d.isoformat()
+    ).execute()
     # 按 (engine, 品牌) 分组统计后批量 insert，见 docs/01 的指标口径
 ```
 
