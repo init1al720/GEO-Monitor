@@ -153,9 +153,15 @@ create table if not exists daily_metrics (
   sentiment_score     numeric(5,2),          -- 0-100，正面占比
   calc_version        text not null default 'v0.1',
   computed_at         timestamptz not null default now(),
-  unique (project_id, metric_date, engine, subject)
+  -- 注意：必须带 NULLS NOT DISTINCT（PG 15+）。
+  -- 普通 UNIQUE 认为两个 NULL 互不相等，engine is null 的"全引擎汇总"行
+  -- 可以重复插入，视图会随机取一条，看板数字漂移。
+  constraint daily_metrics_unique
+    unique nulls not distinct (project_id, metric_date, engine, subject)
 );
 ```
+
+> 已执行过旧版 `01-schema.sql` 的环境，用 `docs/sql/03-fixes.sql` 换掉约束，不要重跑 01。
 
 索引（采集器查询和看板视图都要用）：
 
@@ -263,17 +269,29 @@ cross join lateral (values
 
 ```sql
 create or replace view v_source_distribution as
-select
-  u.project_id,
-  src.domain                                                        as name,
-  count(*)                                                          as citation_count,
-  round(100.0 * count(*) / sum(count(*)) over (partition by u.project_id), 1) as value,
-  max(r.called_at)                                                  as last_seen_at
-from responses r
-join runs u on u.id = r.run_id
-cross join lateral jsonb_array_elements_text(coalesce(r.cited_domains, '[]'::jsonb)) as src(domain)
-where r.status = 'success'
-group by u.project_id, src.domain;
+with latest as (
+  select project_id, max(metric_date) as as_of
+  from daily_metrics where engine is null group by project_id
+),
+pairs as (
+  select distinct
+    u.project_id, src.domain, r.id as response_id, r.called_at
+  from responses r
+  join runs u on u.id = r.run_id
+  left join latest l on l.project_id = u.project_id
+  cross join lateral jsonb_array_elements_text(coalesce(r.cited_domains, '[]'::jsonb)) as src(domain)
+  where r.status = 'success'
+    and r.called_at >= coalesce(l.as_of, (now() at time zone 'utc')::date) - interval '6 days'
+    and r.called_at <  coalesce(l.as_of, (now() at time zone 'utc')::date) + interval '1 day'
+),
+per_domain as (
+  select project_id, domain, count(*) as citation_count, max(called_at) as last_seen_at
+  from pairs group by project_id, domain
+)
+select project_id, domain as name, citation_count,
+       round(100.0 * citation_count / sum(citation_count) over (partition by project_id), 1) as value,
+       last_seen_at
+from per_domain;
 ```
 
 返回：
@@ -285,19 +303,33 @@ group by u.project_id, src.domain;
 ]
 ```
 
+**口径（重要，别按字面理解 `citation_count`）**：
+
+- 计数单位是**回答**，不是域名出现次数。一条回答里把同一域名写了三遍，只算 1 次；三条回答各引用一次，算 3 次。
+- `value` 是该域名在项目窗口内全部信源引用中的占比，分母是总引用次数，同一项目的各域名加起来等于 100。
+- 时间窗口是**最近 7 天**（最新采集日往前推 7 天）。信源结构需要足够样本才稳定，只取一天会因样本量小剧烈跳动。前端脚注请标"近 7 天"。
+- 项目还没算指标时窗口以今天为准，图不会空白。
+
 两处变化：
 
 - 没有 `color` 字段。前端固定一套调色板，按下标取色（`#2563EB / #059669 / #D97706 / #7C3AED / #64748B`），第 6 个以后循环。
 - `value` 是百分比数值（`28.4` 表示 28.4%），Recharts 直接吃，不需要再算。
 
-圆心那个 `1,284` 是写死的，改成从项目维度取：
+圆心那个 `1,284` 是写死的，改成从项目维度取**最新一天**的样本量（不是历史累加）：
 
 ```sql
 create or replace view v_sample_summary as
-select project_id,
-       max(metric_date) as as_of,
-       sum(sample_size) filter (where engine is null and is_own) as samples
-from daily_metrics group by project_id;
+select
+  d.project_id,
+  d.metric_date         as as_of,
+  d.sample_size::bigint as samples
+from daily_metrics d
+where d.engine is null
+  and d.is_own
+  and d.metric_date = (
+    select max(x.metric_date) from daily_metrics x
+    where x.project_id = d.project_id and x.engine is null and x.is_own
+  );
 ```
 
 ### 4.3 `v_radar_metrics` — 竞品雷达

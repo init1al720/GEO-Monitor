@@ -98,7 +98,10 @@ create table if not exists daily_metrics (
   sentiment_score     numeric(5,2),          -- 0-100，正面占比
   calc_version        text not null default 'v0.1',
   computed_at         timestamptz not null default now(),
-  unique (project_id, metric_date, engine, subject)
+  -- NULLS NOT DISTINCT 必须带上（PG 15+）：普通 UNIQUE 认为两个 NULL 互不相等，
+  -- engine is null 的"全引擎汇总"行就能重复插入，看板数字会漂移。
+  constraint daily_metrics_unique
+    unique nulls not distinct (project_id, metric_date, engine, subject)
 );
 
 -- -----------------------------------------------------------------------------
@@ -166,24 +169,46 @@ cross join lateral (values
   ('sov',                '声量份额',   c.sov,                p.sov,                'pct', true)
 ) as k(metric_key, label, val, prev, unit, higher_is_better);
 
+-- 信源分布：按"回答"计数（同一回答内重复域名只算一次），窗口取最近 7 天。
+-- 已执行过旧版的环境用 03-fixes.sql 覆盖，不要重跑本文件。
 create or replace view v_source_distribution as
-select
-  u.project_id,
-  src.domain                                                        as name,
-  count(*)                                                          as citation_count,
-  round(100.0 * count(*) / sum(count(*)) over (partition by u.project_id), 1) as value,
-  max(r.called_at)                                                  as last_seen_at
-from responses r
-join runs u on u.id = r.run_id
-cross join lateral jsonb_array_elements_text(coalesce(r.cited_domains, '[]'::jsonb)) as src(domain)
-where r.status = 'success'
-group by u.project_id, src.domain;
+with latest as (
+  select project_id, max(metric_date) as as_of
+  from daily_metrics where engine is null group by project_id
+),
+pairs as (
+  select distinct
+    u.project_id, src.domain, r.id as response_id, r.called_at
+  from responses r
+  join runs u on u.id = r.run_id
+  left join latest l on l.project_id = u.project_id
+  cross join lateral jsonb_array_elements_text(coalesce(r.cited_domains, '[]'::jsonb)) as src(domain)
+  where r.status = 'success'
+    and r.called_at >= coalesce(l.as_of, (now() at time zone 'utc')::date) - interval '6 days'
+    and r.called_at <  coalesce(l.as_of, (now() at time zone 'utc')::date) + interval '1 day'
+),
+per_domain as (
+  select project_id, domain, count(*) as citation_count, max(called_at) as last_seen_at
+  from pairs group by project_id, domain
+)
+select project_id, domain as name, citation_count,
+       round(100.0 * citation_count / sum(citation_count) over (partition by project_id), 1) as value,
+       last_seen_at
+from per_domain;
 
+-- 样本量取最新一天，不累加历史（累加会把 7 天说成 1 天）
 create or replace view v_sample_summary as
-select project_id,
-       max(metric_date) as as_of,
-       sum(sample_size) filter (where engine is null and is_own) as samples
-from daily_metrics group by project_id;
+select
+  d.project_id,
+  d.metric_date         as as_of,
+  d.sample_size::bigint as samples
+from daily_metrics d
+where d.engine is null
+  and d.is_own
+  and d.metric_date = (
+    select max(x.metric_date) from daily_metrics x
+    where x.project_id = d.project_id and x.engine is null and x.is_own
+  );
 
 create or replace view v_radar_metrics as
 with latest as (
