@@ -125,7 +125,7 @@ Supabase → **Project Settings** → **Database** → **Connection string** →
 | 环形图圆心写死 `1,284` | 读 `v_sample_summary.samples` |
 | 卡片按数组下标上色 | 用视图返回的 `direction` / `is_good` |
 | 「+ 新增指标」弹窗 | 删除 |
-| 雷达图标题写死「钛投标 vs 广联达」 | 从数据读 |
+| 雷达图标题写死「智标枪 vs 广联达」 | 从数据读 |
 | 没有登录 | 加登录页 + `onAuthStateChange` 守卫 |
 
 最后一条有个坑先说：**路由守卫不要用 Next.js middleware**，因为 token 存在 localStorage 里，middleware 跑在服务端读不到，会一直判定未登录。用客户端组件里的 `onAuthStateChange`。

@@ -660,7 +660,7 @@ const { data } = await supabase
 <PolarRadiusAxis domain={[0, 100]} … />
 ```
 
-- 图例文案从 `projects.brand` 和"竞品均值"读，**不再写死"钛投标"“广联达"**。
+- 图例文案从 `projects.brand` 和"竞品均值"读，**不再写死"智标枪""广联达"**。
 - `domain` 从 `[0, 150]` 改 `[0, 100]`。
 
 ### 7.5 还能顺手做掉的两件小事
@@ -731,7 +731,7 @@ alter table radar_metrics        rename to zz_legacy_radar_metrics;
 > 另外三个小改动：
 > - 卡片颜色别再按 `index` 分配，视图给了 `direction` 和 `is_good`，按 `is_good` 上色（平均位次是"越小越好"，按下标上色会反过来）
 > - 环形图圆心那个 `1,284` 换成 `v_sample_summary.samples`
-> - 雷达图里"钛投标 vs 广联达"改成从 `projects` 读，`domain` 从 `[0,150]` 改 `[0,100]`
+> - 雷达图里"智标枪 vs 广联达"改成从 `projects` 读，`domain` 从 `[0,150]` 改 `[0,100]`
 >
 > 还有：`sb_publishable_` 那个 key 没问题，本来就是给浏览器用的。但**如果生成过 service_role 或 secret key，别发给任何人，也别写进代码** —— 那个 key 能绕过所有权限。
 >

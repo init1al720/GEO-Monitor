@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -34,8 +35,25 @@ def get_engine() -> AsyncEngine:
             kwargs["connect_args"] = {"check_same_thread": False}
         else:
             kwargs.update({"pool_size": 5, "max_overflow": 5, "pool_pre_ping": True})
-        _engine = create_async_engine(url, **kwargs)
+
+        engine = create_async_engine(url, **kwargs)
+        if url.startswith("sqlite"):
+            # SQLite 默认 PRAGMA foreign_keys=OFF，DDL 上写的 ondelete=CASCADE
+            # 会被静默忽略：删掉 projects 一行后，runs/responses/mentions 全成孤儿。
+            # 这条必须在每条连接上打开，不能只写进 DDL。
+            _enable_sqlite_foreign_keys(engine)
+        _engine = engine
     return _engine
+
+
+def _enable_sqlite_foreign_keys(engine: AsyncEngine) -> None:
+    """给 SQLite 的每条新连接执行 PRAGMA foreign_keys=ON。"""
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_pragma(dbapi_connection, _connection_record):  # noqa: ANN001, ANN202
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:

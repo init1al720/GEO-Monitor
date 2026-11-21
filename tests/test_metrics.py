@@ -33,7 +33,7 @@ async def session(tmp_path):  # type: ignore[no-untyped-def]
 
 async def _seed(session, day, rows):  # type: ignore[no-untyped-def]
     """rows: [(status, [(brand, is_own, position)])]"""
-    project = Project(name="测试项目", brand="钛投标", competitors=["广联达"], aliases=[])
+    project = Project(name="测试项目", brand="智标枪", competitors=["广联达"], aliases=[])
     session.add(project)
     await session.flush()
 
@@ -75,7 +75,7 @@ async def test_failed_responses_excluded_from_denominator(session) -> None:
         session,
         day,
         [
-            ("success", [("钛投标", True, 1), ("广联达", False, 2)]),
+            ("success", [("智标枪", True, 1), ("广联达", False, 2)]),
             ("success", [("广联达", False, 1)]),
             ("timeout", []),
             ("error", []),
@@ -85,22 +85,22 @@ async def test_failed_responses_excluded_from_denominator(session) -> None:
     rows = await recompute(session, project_id, day)
     by_brand = {r.subject: r for r in rows}
 
-    assert by_brand["钛投标"].sample_size == 2
-    assert float(by_brand["钛投标"].mention_rate) == pytest.approx(0.5)
-    assert float(by_brand["钛投标"].first_mention_rate) == pytest.approx(0.5)
-    assert float(by_brand["钛投标"].avg_position) == pytest.approx(1.0)
+    assert by_brand["智标枪"].sample_size == 2
+    assert float(by_brand["智标枪"].mention_rate) == pytest.approx(0.5)
+    assert float(by_brand["智标枪"].first_mention_rate) == pytest.approx(0.5)
+    assert float(by_brand["智标枪"].avg_position) == pytest.approx(1.0)
     assert float(by_brand["广联达"].mention_rate) == pytest.approx(1.0)
 
 
 async def test_sov_uses_mention_count_not_response_count(session) -> None:
     day = datetime.now(UTC).date()
-    # 提及总次数 5：钛投标 1 次，广联达 4 次（第 3 条回答里提到了两次）
+    # 提及总次数 5：智标枪 1 次，广联达 4 次（第 3 条回答里提到了两次）
     # 若按「回答数」算会得到 1/3 与 2/3，这里刻意验证不是那种算法
     project_id = await _seed(
         session,
         day,
         [
-            ("success", [("钛投标", True, 1), ("广联达", False, 2)]),
+            ("success", [("智标枪", True, 1), ("广联达", False, 2)]),
             ("success", [("广联达", False, 1)]),
             ("success", [("广联达", False, 1), ("广联达", False, 2)]),
         ],
@@ -108,13 +108,13 @@ async def test_sov_uses_mention_count_not_response_count(session) -> None:
 
     rows = await recompute(session, project_id, day)
     by_brand = {r.subject: r for r in rows}
-    assert float(by_brand["钛投标"].sov) == pytest.approx(0.2)
+    assert float(by_brand["智标枪"].sov) == pytest.approx(0.2)
     assert float(by_brand["广联达"].sov) == pytest.approx(0.8)
 
 
 async def test_recompute_is_idempotent(session) -> None:
     day = datetime.now(UTC).date()
-    project_id = await _seed(session, day, [("success", [("钛投标", True, 1)])])
+    project_id = await _seed(session, day, [("success", [("智标枪", True, 1)])])
 
     await recompute(session, project_id, day)
     await recompute(session, project_id, day)
@@ -134,7 +134,7 @@ async def test_brand_never_mentioned_still_gets_zero_row(session) -> None:
 
     rows = await recompute(session, project_id, day)
     own = next(r for r in rows if r.is_own)
-    assert own.subject == "钛投标"
+    assert own.subject == "智标枪"
     assert float(own.mention_rate) == 0.0
 
 
@@ -144,8 +144,8 @@ async def test_citation_rate_counts_own_cited_responses(session) -> None:
         session,
         day,
         [
-            ("success", [("钛投标", True, 1)]),
-            ("success", [("钛投标", True, 1)]),
+            ("success", [("智标枪", True, 1)]),
+            ("success", [("智标枪", True, 1)]),
         ],
     )
     # 上面两条都带了 xiaohongshu.com，引用率应为 1
@@ -156,7 +156,7 @@ async def test_citation_rate_counts_own_cited_responses(session) -> None:
 
 async def test_empty_day_clears_stale_rows(session) -> None:
     yesterday = (datetime.now(UTC) - timedelta(days=1)).date()
-    project_id = await _seed(session, yesterday, [("success", [("钛投标", True, 1)])])
+    project_id = await _seed(session, yesterday, [("success", [("智标枪", True, 1)])])
     await recompute(session, project_id, yesterday)
 
     today = datetime.now(UTC).date()

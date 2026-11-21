@@ -15,6 +15,7 @@ import uuid
 from datetime import UTC, date, datetime, time, timedelta
 
 import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import session_scope
 from app.core.logging import get_logger
@@ -24,8 +25,8 @@ from app.services.metrics import recompute
 
 logger = get_logger(__name__)
 
-DEMO_BRAND = "钛投标"
-DEMO_ALIASES = ["钛投标", "钛投标智能"]
+DEMO_BRAND = "智标枪"
+DEMO_ALIASES = ["智标枪"]
 DEMO_COMPETITORS = ["广联达", "鲁班软件", "新中大"]
 DEMO_PROJECT_NAME = "演示项目 · 建筑投标软件"
 
@@ -61,6 +62,39 @@ _SOURCES = [
 ]
 
 
+async def _purge_runs(session: AsyncSession, project_id: uuid.UUID) -> None:
+    """清空一个项目下的采集结果与指标，保留问题库。重灌样本时用。"""
+    run_ids = list(
+        (await session.scalars(sa.select(Run.id).where(Run.project_id == project_id))).all()
+    )
+    if run_ids:
+        await session.execute(
+            sa.delete(Mention).where(
+                Mention.response_id.in_(sa.select(Response.id).where(Response.run_id.in_(run_ids)))
+            )
+        )
+        await session.execute(sa.delete(Response).where(Response.run_id.in_(run_ids)))
+        await session.execute(sa.delete(Run).where(Run.project_id == project_id))
+    await session.execute(sa.delete(DailyMetric).where(DailyMetric.project_id == project_id))
+    await session.flush()
+
+
+async def _purge_project(session: AsyncSession, project: Project) -> None:
+    """删掉项目本身和它的全部子数据。
+
+    不能只 ``session.delete(project)`` 指望数据库级联：SQLite 默认
+    PRAGMA foreign_keys=OFF，SQLAlchemy 侧也没配 relationship，
+    级联不会真的发生，子表会留下孤儿行。这里显式按依赖顺序删。
+
+    目前只有 ``seed_demo(fresh=True)`` 走重置语义（复用 id，不删项目），
+    这个函数留给后续"删除项目"功能用。
+    """
+    await _purge_runs(session, project.id)
+    await session.execute(sa.delete(Prompt).where(Prompt.project_id == project.id))
+    await session.delete(project)
+    await session.flush()
+
+
 async def seed_demo(
     *,
     days: int = 7,
@@ -71,24 +105,26 @@ async def seed_demo(
 ) -> uuid.UUID:
     """建一个演示项目（含问题库），可选灌入最近 N 天的回答并算好指标。
 
-    返回项目 id。重复执行不会重复建项目，除非 fresh=True（会先删同名项目）。
+    返回项目 id。重复执行不会重复建项目；fresh=True 时清空原有数据重灌，
+    项目 id 保持不变（前端书签里的 project_id 不会失效）。
     """
     rng = random.Random(rng_seed)
 
     async with session_scope() as session:
         existing = await session.scalar(sa.select(Project).where(Project.name == project_name))
-        if existing is not None:
-            if not fresh:
-                logger.info("演示项目已存在，跳过创建：%s（%s）", project_name, existing.id)
-                project = existing
-            else:
-                await session.delete(existing)
-                await session.flush()
-                project = None
+        if existing is not None and not fresh:
+            logger.info("演示项目已存在，跳过创建：%s（%s）", project_name, existing.id)
+            project = existing
+        elif existing is not None:
+            # 复用原 id 重置：清采集数据 + 问题库，再按当前常量重建
+            existing.brand = DEMO_BRAND
+            existing.aliases = DEMO_ALIASES
+            existing.competitors = DEMO_COMPETITORS
+            await _purge_runs(session, existing.id)
+            await session.execute(sa.delete(Prompt).where(Prompt.project_id == existing.id))
+            await session.flush()
+            project = existing
         else:
-            project = None
-
-        if project is None:
             project = Project(
                 name=project_name,
                 brand=DEMO_BRAND,
@@ -118,25 +154,7 @@ async def seed_demo(
         start = today - timedelta(days=days - 1)
 
         # 已有样本就整段重灌，避免同一份数据越叠越多
-        old_runs = list(
-            (await session.scalars(sa.select(Run).where(Run.project_id == project.id))).all()
-        )
-        if old_runs:
-            await session.execute(
-                sa.delete(Mention).where(
-                    Mention.response_id.in_(
-                        sa.select(Response.id).where(Response.run_id.in_([r.id for r in old_runs]))
-                    )
-                )
-            )
-            await session.execute(
-                sa.delete(Response).where(Response.run_id.in_([r.id for r in old_runs]))
-            )
-            await session.execute(sa.delete(Run).where(Run.project_id == project.id))
-            await session.execute(
-                sa.delete(DailyMetric).where(DailyMetric.project_id == project.id)
-            )
-            await session.flush()
+        await _purge_runs(session, project.id)
 
         prompts = list(
             (
