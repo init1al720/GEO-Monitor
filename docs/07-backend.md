@@ -7,7 +7,7 @@
 ```
 app/
 ├─ api/                   给前端和运维用的薄接口层（鉴权 + 触发采集 + 探针，见 docs/08）
-├─ cli.py                 命令行入口（init / check / seed / prompts / collect / metrics / stats / reanalyze）
+├─ cli.py                 命令行入口（init / check / verify / engines / seed / prompts / collect / metrics / stats / reanalyze）
 ├─ core/
 │  ├─ config.py           环境变量（数据库串、各引擎密钥、并发与超时、报告时区）
 │  ├─ db.py               异步 engine + session 工厂 + 连接串归一化（sslmode → asyncpg ssl）
@@ -27,6 +27,7 @@ app/
    ├─ analyzer.py         纯函数：品牌命中、位次、情绪、引用域名
    ├─ metrics.py          聚合：responses + mentions → daily_metrics
    ├─ membership.py       项目角色查询（权限判定唯一入口）
+   ├─ schema_check.py     线上 schema 体检（只读系统表，可随时在生产跑）
    └─ seed.py             造演示数据（不花钱也能让看板出数）
 ```
 
@@ -46,10 +47,14 @@ python -m app.cli seed --days 7
 # 3. 自检：连通性 + 各表行数
 python -m app.cli check
 
+# 3.5 线上 schema 体检：视图 security_invoker、唯一约束、只读策略、视图列
+python -m app.cli verify
+
 # 4. 真采集（需先在 .env 配好 DEEPSEEK_API_KEY）
 python -m app.cli prompts --project 演示项目 --file qs.txt    # 批量灌问题库
 python -m app.cli collect --project 演示项目 --limit 2 --dry-run   # 先试跑不写库
 python -m app.cli collect --project 演示项目                       # 采集，结束自动算指标
+python -m app.cli collect --all                                    # 所有项目各跑一轮（定时任务用）
 
 # 5. 看用量和成本
 python -m app.cli stats --project 演示项目 --days 7
@@ -114,36 +119,19 @@ DATABASE_URL=postgresql+asyncpg://postgres.<ref>:<密码>@aws-1-ap-northeast-1.p
 
 ## 六、定时采集
 
-现在没接调度器，靠命令行手动跑。上线时用 systemd timer 每天跑一次：
+单元文件在 `deploy/` 下，直接拷到 `/etc/systemd/system/`，安装步骤见 `deploy/README.md`，完整部署流程见 `docs/02-deploy.md`。
 
-```ini
-# /etc/systemd/system/geo-collect.service
-[Unit]
-Description=GEO 每日采集
-After=network-online.target
+调度入口是 `collect --all`：逐个跑所有项目，单个项目失败不影响其他项目，最后用退出码告诉 systemd 这轮有没有失败。手动跑一轮：
 
-[Service]
-Type=oneshot
-User=deploy
-WorkingDirectory=/srv/geo/backend
-EnvironmentFile=/srv/geo/backend/.env
-ExecStart=/srv/geo/backend/.venv/bin/python -m app.cli collect --project 演示项目 --metrics
+```bash
+sudo systemctl start geo-collect.service
+journalctl -u geo-collect -n 80 --no-pager
 ```
 
-```ini
-# geo-collect.timer
-[Unit]
-Description=每天 03:00 采集
+两个设计要点：
 
-[Timer]
-OnCalendar=*-*-* 03:00:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
-
-`Persistent=true` 很重要：服务器宕机错过的任务，开机后会补跑一次。
+- **不用 API 进程内定时器。** API 会被重启（发版、OOM），进程里的定时任务跟着没；systemd timer 是系统级的，`Persistent=true` 还能补跑宕机错过的点。
+- **`EnvironmentFile` 不要写。** 配置由 pydantic-settings 从 `WorkingDirectory/.env` 读，走 systemd 的 `EnvironmentFile` 会被它的引号规则坑到（密码里的 `#`、`$` 会被吃掉）。
 
 ## 七、已知限制（v0.1）
 

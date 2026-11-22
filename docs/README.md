@@ -8,7 +8,8 @@ GEO 优化监测平台（生成式引擎优化监测）。后端复用本仓库�
 |---|---|---|
 | [00-basics.md](./00-basics.md) | 基础概念：CI、JWT、OpenAPI、数据库迁移、反向代理、systemd。**开工前先看这份** | 双方 |
 | [01-week1-plan.md](./01-week1-plan.md) | 第一周详细计划：范围、7 个接口契约、3 张表、逐日任务到文件级、代码骨架、联调手册、验收标准 | 双方 |
-| [02-deploy.md](./02-deploy.md) | 服务器部署手册：Nginx + systemd + Postgres + HTTPS + 备份 + 一键更新与回滚 + 排错表 | 后端 |
+| [02-deploy.md](./02-deploy.md) | **服务器部署手册（当前架构）**：Supabase + Vercel + 采集机；systemd 单元、Nginx、HTTPS、备份、一键更新、验收与排错 | 后端 |
+| [../deploy/](../deploy/) | **可直接用的部署文件**：`geo-api.service`、`geo-collect.service/.timer`、`nginx-api.conf`、`deploy.sh`、`backup.sh` | 后端 |
 | [03-github.md](./03-github.md) | GitHub 操作清单：建仓、权限、分支保护、CI、部署密钥、Actions、协作规范 | 双方 |
 | [04-supabase-contract.md](./04-supabase-contract.md) | **数据契约 v0.1（当前方案）**：6 张业务表 + 4 个视图 + 采集器契约 + 前端改造清单 | 双方 |
 | [05-auth-permission.md](./05-auth-permission.md) | **认证与权限 v0.1**：角色矩阵、RLS 策略、触发器、前端登录代码、控制台设置 | 双方 |
@@ -58,8 +59,9 @@ GEO 优化监测平台（生成式引擎优化监测）。后端复用本仓库�
 - [x] 后端接口 v0.1（Supabase JWT 校验、项目角色判定、采集触发/重算/运行记录，新增 19 个测试，共 45 个）
 - [x] 线上 SQL 执行（00/01/02 由前端执行，实测无报错；`03-fixes.sql` 修掉暴露的 3 个口径问题）
 - [x] 采集链路加固 v0.2（连接串兼容 pooler、重试只针对临时故障、连接复用、采完自动算指标、并发触发去竞态、业务时区切天、`/ready` 探针、`prompts`/`stats` 命令，共 70 个测试）
+- [x] 部署落地（`deploy/` 五个实体文件、`collect --all` 定时入口、`verify` schema 体检、CORS 支持 Vercel 预览域名、部署文档按当前架构重写）
 - [ ] 第一次真实采集（等 `03` 跑完 + Auth 两项设置确认）
-- [ ] 定时采集（systemd timer）
+- [ ] 服务器上线（DNS → 部署 → timer 跑通）
 - [ ] W1：建表、视图、seed、前端接真视图
 - [ ] W2：采集链路
 - [ ] W3：指标聚合

@@ -1,16 +1,18 @@
 """命令行入口。
 
     python -m app.cli check                     # 连通性 + 表结构自检
+    python -m app.cli verify                    # 线上 schema 体检（视图/RLS/约束/列）
     python -m app.cli engines                   # 看哪些引擎配了密钥
     python -m app.cli init                      # 本地 SQLite 建表（线上用 SQL 脚本）
     python -m app.cli seed                      # 演示项目 + 7 天示例回答 + 指标
     python -m app.cli prompts --project <id>    # 看问题库 / 批量导入问题
     python -m app.cli collect --project <id>    # 真采集一轮（自动重算指标）
+    python -m app.cli collect --all             # 所有项目各跑一轮（定时任务用）
     python -m app.cli metrics --project <id> --days 7
     python -m app.cli stats --project <id>      # 用量、成本、成功率
     python -m app.cli reanalyze --run <id>      # 规则改了，重跑解析不重新采集
 
-生产上由 systemd timer 每天调用 collect，见 docs/02-deploy.md。
+生产上由 systemd timer 每天调用 `collect --all`，unit 文件在 deploy/ 下。
 """
 
 from __future__ import annotations
@@ -82,6 +84,26 @@ async def cmd_check(_: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_verify(_: argparse.Namespace) -> int:
+    """线上 schema 体检。只读系统表，可以随时在生产跑。"""
+    from app.services.schema_check import summarize, verify_schema
+
+    async with session_scope() as session:
+        checks = await verify_schema(session)
+
+    for check in checks:
+        mark = "SKIP" if check.skipped else ("OK  " if check.ok else "FAIL")
+        print(f"  [{mark}] {check.name:22s} {check.detail}")
+
+    passed, total, skipped = summarize(checks)
+    tail = f"（跳过 {skipped} 项）" if skipped else ""
+    if passed + skipped == total:
+        print(f"\n{passed}/{total} 项通过{tail}")
+        return 0
+    print(f"\n{passed}/{total} 项通过，{total - passed} 项需要处理{tail}")
+    return 1
+
+
 async def cmd_engines(_: argparse.Namespace) -> int:
     from app.engines import all_engines, available_engines
 
@@ -127,33 +149,93 @@ async def _resolve_project(value: str) -> uuid.UUID:
         return found.id
 
 
-async def cmd_collect(args: argparse.Namespace) -> int:
+async def _collect_one(
+    project_id: uuid.UUID,
+    *,
+    engines: list[str] | None,
+    limit: int | None,
+    dry_run: bool,
+    recompute_metrics: bool,
+) -> bool:
+    """跑一个项目，返回是否算成功。异常不在这里吞，由调用方决定怎么记。"""
     from app.services.collector import run_once
 
-    project_id = await _resolve_project(args.project)
-    engines = [e.strip() for e in args.engines.split(",") if e.strip()] or None
     result = await run_once(
         project_id,
         engines=engines,
-        max_prompts=args.limit,
-        dry_run=args.dry_run,
+        max_prompts=limit,
+        dry_run=dry_run,
     )
     print(
-        f"run {result.status} | 成功 {result.success} / 失败 {result.failed}"
+        f"  run {result.status} | 成功 {result.success} / 失败 {result.failed}"
         f" | 成本 ${result.cost_usd:.4f}"
     )
     for err in result.errors[:5]:
-        print(f"  失败：{err}")
+        print(f"    失败：{err}")
     if result.status == "dry_run":
-        print("（dry-run：没有写库，也没有生成指标）")
-        return 0 if result.success else 1
-    if args.metrics and result.run_id:
+        print("    （dry-run：没有写库，也没有生成指标）")
+        return bool(result.success)
+
+    if recompute_metrics and result.run_id:
         from app.services.metrics import recompute
 
         async with session_scope() as session:
             rows = await recompute(session, project_id, business_today())
-        print(f"已重算当天指标 {len(rows)} 行")
-    return 0 if result.status in {"success", "partial"} else 1
+        print(f"    已重算当天指标 {len(rows)} 行")
+    return result.status in {"success", "partial"}
+
+
+async def cmd_collect(args: argparse.Namespace) -> int:
+    if bool(args.project) == bool(args.all):
+        raise SystemExit("--project 和 --all 必须且只能给一个")
+
+    engines = [e.strip() for e in args.engines.split(",") if e.strip()] or None
+
+    if not args.all:
+        project_id = await _resolve_project(args.project)
+        ok = await _collect_one(
+            project_id,
+            engines=engines,
+            limit=args.limit,
+            dry_run=args.dry_run,
+            recompute_metrics=args.metrics,
+        )
+        return 0 if ok else 1
+
+    # 定时任务走这里：一个项目炸了不能拖住后面所有项目，
+    # 所以逐个 try，最后统一用退出码告诉 systemd 这轮有没有失败。
+    async with session_scope() as session:
+        rows = (
+            await session.execute(sa.select(Project.id, Project.name).order_by(Project.created_at))
+        ).all()
+    if not rows:
+        print("没有任何项目，先建一个：python -m app.cli seed 或在前端新建")
+        return 1
+
+    failed: list[str] = []
+    for project_id, name in rows:
+        print(f"[{name}]")
+        try:
+            ok = await _collect_one(
+                project_id,
+                engines=engines,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                recompute_metrics=args.metrics,
+            )
+        except Exception as exc:  # noqa: BLE001 - 单个项目失败要继续跑下一个
+            logger.warning("项目采集失败，继续下一个 | %s | %s", name, exc)
+            print(f"    跳过：{exc}")
+            ok = False
+        if not ok:
+            failed.append(name)
+
+    total = len(rows)
+    print(f"\n共 {total} 个项目，成功 {total - len(failed)}，失败 {len(failed)}")
+    if failed:
+        print("失败的项目：" + "、".join(failed))
+        return 1
+    return 0
 
 
 async def cmd_metrics(args: argparse.Namespace) -> int:
@@ -344,6 +426,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_check = sub.add_parser("check", help="检查数据库连通性与表结构")
     p_check.set_defaults(func=cmd_check)
 
+    p_verify = sub.add_parser("verify", help="线上 schema 体检：视图、RLS、唯一约束、视图列")
+    p_verify.set_defaults(func=cmd_verify)
+
     p_engines = sub.add_parser("engines", help="查看各引擎密钥配置状态")
     p_engines.set_defaults(func=cmd_engines)
 
@@ -354,12 +439,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_seed.set_defaults(func=cmd_seed)
 
     p_collect = sub.add_parser("collect", help="跑一轮真实采集")
-    p_collect.add_argument("--project", required=True, help="项目 id 或项目名")
+    p_collect.add_argument("--project", default="", help="项目 id 或项目名")
+    p_collect.add_argument("--all", action="store_true", help="所有项目各跑一轮（定时任务用）")
     p_collect.add_argument("--engines", default="", help="逗号分隔，默认所有已配置引擎")
     p_collect.add_argument("--limit", type=int, default=None, help="最多跑几个问题")
     p_collect.add_argument("--dry-run", action="store_true", help="只调引擎不写库")
     p_collect.add_argument(
-        "--metrics", action="store_true", help="采集完重算当天指标（服务端默认已自动重算）"
+        "--metrics", action="store_true", help="强制重算当天指标（COLLECT_AUTO_METRICS 已默认开）"
     )
     p_collect.set_defaults(func=cmd_collect)
 

@@ -1,0 +1,19 @@
+[Unit]
+Description=每天北京时间 02:30 触发 GEO 采集
+
+[Timer]
+# 带时区后缀的时间表达式，需要 systemd >= 236（Ubuntu 22.04 是 249，够）。
+# 若这台机器的 systemd 不认，删掉 " Asia/Shanghai"，改为在 service 里靠 TZ 控制，
+# 但要记得 timer 本身会按系统时区解释 OnCalendar，服务器最好是 UTC 就改成 18:30。
+OnCalendar=*-*-* 02:30:00 Asia/Shanghai
+
+# 随机延迟最多 5 分钟：多家客户同一时间打引擎容易被限流
+RandomizedDelaySec=300
+
+# 关机或重启错过了时间点，开机后补跑一次。漏一天的数据补不回来，这条很重要。
+Persistent=true
+
+Unit=geo-collect.service
+
+[Install]
+WantedBy=timers.target

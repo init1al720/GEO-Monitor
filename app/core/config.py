@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     port: int = 8000
     api_v1_prefix: str = "/api/v1"
     cors_origins: str = "*"
+    # 前端在 Vercel，预览地址形如 geo-monitor-abc123-xxx.vercel.app，每次 PR 都变，
+    # 没法一条条列进白名单。用正则匹配整个域名段，比放开 * 安全得多。
+    cors_origin_regex: str = ""
     request_id_header: str = "X-Request-ID"
 
     # 日志

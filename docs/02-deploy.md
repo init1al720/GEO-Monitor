@@ -1,92 +1,91 @@
 # 服务器部署手册
 
-> 目标：把后端 + 前端部署到一台 Linux 云服务器，用域名 HTTPS 访问，之后一条命令更新。
-> 适用：Ubuntu 22.04 / 24.04，2 核 2G 起步（低于 2G 必须先加 swap）。
+> 目标：把**后端采集与 API** 部署到一台 Linux 服务器，每天自动采集、随时能被前端调用。
+> 数据库和登录不在服务器上，在 Supabase；前端页面在 Vercel。
+> 适用：Ubuntu 22.04 / 24.04，**1 核 1G 就够**（这台机器不建数据库、不构建前端）。
 
-## 一、部署架构
+## 一、现在这套东西各自在哪跑
 
 ```
-用户浏览器
-    │  https://geo.example.com
-    ▼
-┌─────────────────────────────────────────┐
-│ Nginx :443（TLS 终止、静态托管、反代）    │
-│   /        → /var/www/geo（前端 dist）   │
-│   /api/    → 127.0.0.1:8000              │
-└─────────────────────────────────────────┘
-                    │
-                    ▼
-        uvicorn（systemd: geo-api，2 worker）
-                    │
-                    ▼
-        PostgreSQL 127.0.0.1:5432（geo 库）
+        用户浏览器
+             │
+    ┌────────┴─────────┐
+    │                  │
+    ▼                  ▼
+Vercel            api.geo.example.com
+Next.js 前端            │  Nginx :443
+    │                   ▼
+    │            ┌──────────────┐
+    │            │ geo-api      │  FastAPI，只监听 127.0.0.1:8000
+    │            └──────────────┘
+    │                   │
+    │            ┌──────────────┐
+    │            │geo-collect   │  每天 02:30 跑一次（systemd timer）
+    │            └──────────────┘
+    │                   │
+    └────────┬──────────┘
+             ▼
+    Supabase（Postgres + Auth + RLS）
 ```
 
-关键决策：**前后端同域部署**，前端请求走相对路径 `/api/v1`。这样生产环境不需要 CORS，也省掉一堆跨域排查。
+| 东西 | 跑在哪 | 谁负责 |
+|---|---|---|
+| 前端页面 | Vercel | 前端 |
+| 数据库、登录、权限 | Supabase | 前端执行 SQL，我们出 SQL |
+| 看板读数据 | 前端直连 Supabase（anon key + RLS） | 前端 |
+| 采集、算指标、触发接口 | **本文这台服务器** | 后端 |
 
-需要提前准备的东西：
+两个关键判断，先说清楚，免得照老文档装错：
+
+1. **这台机器不装 Postgres。** 数据库在 Supabase，服务器只是它的一个客户端。装本地库会多一份要备份、要升级、会跟线上数据对不上的东西。
+2. **这台机器不构建前端。** 前端推 Vercel 自动构建，我们不用 Node、不用 pnpm。
+
+服务器要准备的东西：
 
 | 项 | 说明 | 示例 |
 |---|---|---|
-| 服务器 | Ubuntu 22.04+，有公网 IP，能 SSH | `1.2.3.4` |
-| 域名 | A 记录指向服务器 IP | `geo.example.com` |
+| 服务器 | Ubuntu 22.04+，1C1G 起，有公网 IP | `1.2.3.4` |
+| 域名 | 一条 A 记录指向服务器 | `api.geo.example.com` |
 | 端口 | 安全组放行 22 / 80 / 443 | — |
-| 仓库 | 后端私仓已推到 GitHub | `github.com/<你>/geo-backend` |
-| 前端仓 | 前端的前端私仓 | `github.com/<前端>/geo-frontend` |
+| Supabase 连接串 | Session pooler 那条（见第四节） | — |
+| 引擎密钥 | 至少一家大模型的 API key | `DEEPSEEK_API_KEY` |
 
-下文命令统一用这些变量，执行前替换掉：
+下文统一用这两个变量，执行前替换：
 
 ```bash
 SERVER_IP=1.2.3.4
-DOMAIN=geo.example.com
+DOMAIN=api.geo.example.com
 ```
 
-## 一点五、首次部署时间线与验证点
+## 二、首次部署时间线
 
-第一次做大约 40–60 分钟（含装依赖）。每完成一步都有明确的验证动作，**验证不过不要往下走**，否则错误会累积到最后难以定位。
+第一次约 30 分钟，比老文档短很多——不建库、不装 Node、不构建前端。
 
-| 阶段 | 大概耗时 | 做完的验证动作 | 期望结果 |
+| 阶段 | 耗时 | 验证动作 | 期望结果 |
 |---|---|---|---|
-| DNS + 安全组 | 5 分钟（等生效 1–10 分钟） | `ping geo.example.com` | 返回服务器 IP |
-| 建用户 / 禁 root | 5 分钟 | 新开终端 `ssh deploy@IP` | 能登录，`whoami` 是 deploy |
-| 装依赖 | 8–10 分钟 | `python3 -V && node -v && nginx -v` | 都打印出版本号 |
-| 建库 | 3 分钟 | `psql "postgresql://..." -c '\conninfo'` | 显示 connected to database "geo" |
-| 拉代码 | 3 分钟 | `ls /opt/geo/backend/app` | 看到 `main.py` |
-| 后端依赖 + .env | 5 分钟 | `.venv/bin/python -c "import fastapi"` | 无报错 |
-| 迁移 + seed | 3 分钟 | `.venv/bin/alembic current` | 打印迁移版本号 |
+| DNS + 安全组 | 5 分钟 | `ping api.geo.example.com` | 返回服务器 IP |
+| 建用户 / 禁 root | 5 分钟 | 新终端 `ssh deploy@IP` | 能登录，`whoami` 是 deploy |
+| 装依赖 | 3 分钟 | `python3 -V && nginx -v` | 都打印版本号 |
+| 拉代码 + venv | 3 分钟 | `.venv/bin/python -c "import fastapi"` | 无报错 |
+| 配 `.env` | 3 分钟 | `python -m app.cli check` | 打印 6 张表的行数 |
+| schema 体检 | 1 分钟 | `python -m app.cli verify` | 全部 `[OK]` |
 | systemd | 3 分钟 | `curl 127.0.0.1:8000/api/v1/health` | `{"code":"ok",...}` |
-| 前端构建 | 5–8 分钟 | `ls /var/www/geo/index.html` | 文件存在 |
-| Nginx | 3 分钟 | `curl -I http://geo.example.com` | `200`（此时还没 https） |
-| HTTPS | 3 分钟 | 浏览器打开域名 | 有锁，`/api/v1/health` 也通 |
-| 防火墙 + 备份 | 3 分钟 | `ufw status`；`crontab -l` | 只有 22/80/443；有备份任务 |
+| Nginx | 2 分钟 | `curl -I http://api.geo.example.com` | `200` |
+| HTTPS | 3 分钟 | `curl https://api.geo.example.com/health` | `{"code":"ok",...}` |
 
-最容易卡住的三步，以及典型表现：
+**验证不过不要往下走**，错误会累积到最后难以定位。
 
-| 卡在哪 | 典型表现 | 直接去看 |
-|---|---|---|
-| 拉代码 | `Permission denied (publickey)` | Deploy Key 没加，或 `~/.ssh/config` 的 Host 别名和 clone 地址不一致 |
-| 前端构建 | 进程被 `Killed` | 内存不够，回去补 swap |
-| HTTPS | `Failed authorization procedure` | DNS 没生效，或 80 端口被别的站点占用（`nginx -t` + 删 default 站点） |
-
-## 二、第一步：DNS 与安全组
-
-1. 域名控制台加一条 A 记录：`geo` → `SERVER_IP`，TTL 默认
-2. 云服务器安全组放行 `22`、`80`、`443`（**不要**放行 5432 和 8000）
-3. 本机验证解析生效：`ping geo.example.com`
-
-> DNS 没生效就先别申请证书，certbot 会校验失败。解析生效一般 1–10 分钟。
-
-## 三、初始化服务器（用 root 执行一次）
+## 三、初始化服务器（root 执行一次）
 
 ### 1. 建运维用户，禁用 root 直连
 
 ```bash
 adduser deploy
 usermod -aG sudo deploy
-# 把本机公钥给 deploy 用户（本机执行 ssh-copy-id deploy@SERVER_IP）
+# 本机执行：ssh-copy-id deploy@SERVER_IP
 ```
 
-确认 `ssh deploy@SERVER_IP` 能登录后，编辑 `/etc/ssh/sshd_config`：
+确认 `ssh deploy@SERVER_IP` 能登录后，改 `/etc/ssh/sshd_config`：
 
 ```
 PermitRootLogin no
@@ -101,18 +100,14 @@ systemctl restart ssh
 
 ```bash
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y git curl nginx postgresql postgresql-contrib python3 python3-venv python3-pip ufw
+sudo apt install -y git curl nginx python3 python3-venv python3-pip ufw
 
-# Node 20（前端构建用）
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-sudo npm i -g pnpm
-
-# 版本自检：Python 需 >= 3.11
-python3 -V && node -v && pnpm -v
+python3 -V          # 需要 >= 3.11
 ```
 
-### 3. 加 swap（内存 2G 及以下必做，否则 `pnpm build` 会被 OOM 杀掉）
+**不需要装**：Postgres、Node、pnpm、Docker。
+
+### 3. 加 swap（1G 内存必做）
 
 ```bash
 sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
@@ -121,289 +116,208 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 free -h
 ```
 
-## 四、数据库
+## 四、拉代码与配置
+
+### 1. 只读部署密钥
+
+不要把个人私钥放服务器上，给仓库配一把只能读的 Deploy Key：
 
 ```bash
-sudo -u postgres psql <<'SQL'
-CREATE USER geo WITH PASSWORD '换成你的强密码';
-CREATE DATABASE geo OWNER geo ENCODING 'UTF8';
-SQL
-
-# 验证（能连上并看到 geo= 就对了）
-psql "postgresql://geo:你的密码@127.0.0.1:5432/geo" -c '\conninfo'
-```
-
-Postgres 默认只监听 `127.0.0.1`，这正是我们要的——数据库不暴露到公网。
-
-## 五、拉代码（服务器上配只读部署密钥）
-
-服务器要能拉私仓，但**不要**把你的个人 SSH 私钥放到服务器上。每个仓库配一把独立的只读 Deploy Key：
-
-```bash
-# 服务器上生成
 ssh-keygen -t ed25519 -C "server@geo" -f ~/.ssh/geo_backend -N ""
-ssh-keygen -t ed25519 -C "server@geo" -f ~/.ssh/geo_frontend -N ""
 cat ~/.ssh/geo_backend.pub
 ```
 
-把 `geo_backend.pub` 内容贴到后端仓：GitHub → 仓库 → Settings → Deploy keys → Add deploy key（**不勾** Allow write access）。
-`geo_frontend.pub` 同理贴到前端仓。
+贴到 GitHub → 后端仓 → Settings → Deploy keys → Add deploy key（**不勾** Allow write access）。
 
-写 `~/.ssh/config` 指定用哪把钥匙：
-
-```
+```bash
+cat >> ~/.ssh/config <<'EOF'
 Host github-backend
   HostName github.com
   User git
   IdentityFile ~/.ssh/geo_backend
   IdentitiesOnly yes
+EOF
 
-Host github-frontend
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/geo_frontend
-  IdentitiesOnly yes
+sudo mkdir -p /opt/geo && sudo chown -R deploy:deploy /opt/geo
+git clone git@github-backend:<你>/GEO-Monitor.git /opt/geo/backend
+mkdir -p /opt/geo/backups
 ```
 
-```bash
-mkdir -p /opt/geo && sudo chown -R deploy:deploy /opt/geo
-cd /opt/geo
-git clone git@github-backend:<你>/geo-backend.git backend
-git clone git@github-frontend:<前端>/geo-frontend.git frontend
-```
-
-`/opt/geo` 下的目录结构：
-
-```
-/opt/geo/
-├── backend/          # 后端仓库
-├── frontend/         # 前端仓库
-├── backups/          # 数据库备份
-└── logs/             # 需要文件日志时用
-```
-
-## 六、后端：依赖、配置、迁移
+### 2. 虚拟环境
 
 ```bash
 cd /opt/geo/backend
 python3 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -e .        # 只装生产依赖，不装 dev
+.venv/bin/pip install --upgrade pip -q
+.venv/bin/pip install -e . -q       # 只装生产依赖
+.venv/bin/python -c "import fastapi, asyncpg, jwt; print('依赖 OK')"
 ```
 
-> 若 `pyproject.toml` 里还没加 `asyncpg`，现在补上：`asyncpg>=0.29`，Postgres 异步驱动必需。
-
-生成生产配置：
+### 3. 生产 `.env`
 
 ```bash
 cp .env.example .env
-openssl rand -hex 32          # 把输出填到 JWT_SECRET
+chmod 600 .env
 nano .env
 ```
 
-生产 `.env` 关键项（其余保持默认）：
+必须改的项：
 
 ```ini
 ENV=prod
 DEBUG=false
 LOG_JSON=true
 LOG_LEVEL=INFO
+
+# 只监听本机，外部一律走 Nginx
 HOST=127.0.0.1
 PORT=8000
-DATABASE_URL=postgresql+asyncpg://geo:你的密码@127.0.0.1:5432/geo
-JWT_SECRET=上一步生成的32字节hex
-CORS_ORIGINS=https://geo.example.com
+
+# Supabase Session pooler（Project Settings → Database → Connection string → Session pooler）
+DATABASE_URL=postgresql://postgres.<ref>:<密码>@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres
+
+# 只用于校验前端带来的 token，填上就行，不用找 secret
+SUPABASE_URL=https://<ref>.supabase.co
+
+# 前端 Vercel 域名；预览域名用正则兜住
+CORS_ORIGINS=https://geo-monitor.vercel.app
+CORS_ORIGIN_REGEX=^https://geo-monitor(-[a-z0-9-]+)?\.vercel\.app$
+
+REPORT_TIMEZONE=Asia/Shanghai
 ```
 
-注意 `HOST=127.0.0.1` —— 只监听本机，外部一律走 Nginx。
+三条容易踩的：
 
-跑迁移和种子数据：
+- **用 pooler 串，别用 `db.xxx.supabase.co` 直连串。** 直连域名在部分网络里只有 IPv6，会报 `ENETUNREACH`；我们这边实测在 WSL 里就是这样。
+- **串里带 `?sslmode=require` 不用删。** 代码会自动翻译成 asyncpg 的参数，原样粘贴即可。
+- **不要写 `JWT_SECRET`。** 那是早期自签方案的遗留，现在 token 由 Supabase 签，写了也不起作用（会被忽略，但容易让人误以为鉴权配错了）。
+
+`CORS_ORIGINS` 里写的是**前端实际域名**，写错了浏览器会直接拦请求并报 CORS 错，日志里看不到，因为请求根本没到。
+
+### 4. 第一次自检
 
 ```bash
 cd /opt/geo/backend
-.venv/bin/alembic upgrade head
-.venv/bin/python -m app.scripts.seed     # 首次部署灌演示数据，生产可跳过
+
+# 连得上库吗、6 张表在不在
+.venv/bin/python -m app.cli check
+
+# schema 体检：视图、security_invoker、唯一约束、只读策略
+.venv/bin/python -m app.cli verify
+
+# 哪些引擎配了密钥
+.venv/bin/python -m app.cli engines
 ```
 
-## 七、后端：systemd 托管
+`check` 报缺表 → 说明 `docs/sql/01-schema.sql` 或 `02-auth.sql` 还没跑完，去 Supabase SQL Editor 补。
+`verify` 报某项为 `[FAIL]`，detail 里写了该跑哪份 SQL，不要跳过——视图 `security_invoker` 掉了会变成绕过 RLS，客户之间能互相看到数据。
+
+想先确认链路通不通、又不想花钱：
 
 ```bash
-sudo nano /etc/systemd/system/geo-api.service
+.venv/bin/python -m app.cli seed                 # 灌 7 天假数据
+.venv/bin/python -m app.cli collect --all --dry-run --limit 1   # 真调引擎但不写库
 ```
 
-```ini
-[Unit]
-Description=GEO API (FastAPI)
-After=network.target postgresql.service
-Wants=postgresql.service
+## 五、systemd：常驻服务 + 每日采集
 
-[Service]
-Type=simple
-User=deploy
-Group=deploy
-WorkingDirectory=/opt/geo/backend
-ExecStart=/opt/geo/backend/.venv/bin/uvicorn app.main:app \
-    --host 127.0.0.1 --port 8000 \
-    --workers 2 \
-    --proxy-headers --forwarded-allow-ips=127.0.0.1
-Restart=always
-RestartSec=3
-
-# 基础加固
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ReadWritePaths=/opt/geo/backend
-
-[Install]
-WantedBy=multi-user.target
-```
+单元文件都在仓库 `deploy/` 下，直接拷：
 
 ```bash
+cd /opt/geo/backend
+sudo cp deploy/geo-api.service deploy/geo-collect.service deploy/geo-collect.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now geo-api
-sudo systemctl status geo-api --no-pager
+sudo systemctl enable --now geo-api geo-collect.timer
+```
+
+验证：
+
+```bash
+systemctl status geo-api --no-pager
 curl -s http://127.0.0.1:8000/api/v1/health
-journalctl -u geo-api -n 50 --no-pager      # 看日志
+systemctl list-timers geo-collect.timer --no-pager    # 看下次触发时间
 ```
 
-> 配置读的是 `WorkingDirectory` 下的 `.env`（pydantic-settings 自动加载），所以**不需要**在 unit 里写 `EnvironmentFile`——那样反而会被 systemd 的引号规则坑到。
-
-## 八、前端：构建到 Nginx 目录
-
-先确认前端生产环境的接口地址用的是**相对路径**（同域部署，避免跨域）：
-
-```
-# frontend/.env.production
-VITE_API_BASE=/api/v1
-```
+手动跑一轮采集（前台等它结束，约 5–10 分钟）：
 
 ```bash
-cd /opt/geo/frontend
-pnpm install --frozen-lockfile
-pnpm build                      # 产物在 dist/
-
-sudo mkdir -p /var/www/geo
-sudo chown deploy:deploy /var/www/geo
-rsync -a --delete dist/ /var/www/geo/
+sudo systemctl start geo-collect.service
+journalctl -u geo-collect -n 80 --no-pager
 ```
 
-## 九、Nginx
+**为什么采集用 timer 而不是 API 进程内定时器**：API 会被重启（发版、OOM），进程内的定时任务跟着没；timer 是系统级的，重启后 `Persistent=true` 还会补跑错过的点。API 里那个 `/collect` 接口只用于「手动补跑一次」。
+
+`--all` 是逐个项目跑，单个项目失败不影响后面的；退出码非 0 时 `systemctl status` 会显示 failed，很好发现。
+
+## 六、Nginx 与 HTTPS
+
+DNS 先加 A 记录：`api` → `SERVER_IP`，等 `ping api.geo.example.com` 通了再申请证书。
 
 ```bash
-sudo nano /etc/nginx/sites-available/geo
-```
-
-```nginx
-server {
-    listen 80;
-    server_name geo.example.com;
-
-    root /var/www/geo;
-    index index.html;
-
-    # 前端单页应用：刷新子路由不能 404
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # 带 hash 的静态资源长缓存
-    location /assets/ {
-        expires 30d;
-        add_header Cache-Control "public, immutable";
-    }
-
-    # 后端接口
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 180s;    # W2 的采集接口会慢，先留足
-    }
-
-    client_max_body_size 20m;
-    gzip on;
-    gzip_types text/css application/javascript application/json image/svg+xml;
-}
-```
-
-```bash
-sudo ln -s /etc/nginx/sites-available/geo /etc/nginx/sites-enabled/geo
-sudo rm -f /etc/nginx/sites-enabled/default      # 去掉默认站点，避免 80 抢路
+sudo cp /opt/geo/backend/deploy/nginx-api.conf /etc/nginx/sites-available/geo-api
+sudo sed -i "s/api\.geo\.example\.com/$DOMAIN/" /etc/nginx/sites-available/geo-api
+sudo ln -sf /etc/nginx/sites-available/geo-api /etc/nginx/sites-enabled/geo-api
+sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-## 十、HTTPS
+配置文件里对外只开 `/api/` 和 `/health`，其他一律 404——这台机器不托管前端，没必要暴露 `/docs`。
 
 ```bash
 sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d geo.example.com --redirect -m 你的邮箱 --agree-tos -n
-sudo certbot renew --dry-run        # 验证自动续期
+sudo certbot --nginx -d api.geo.example.com --redirect -m 你的邮箱 --agree-tos -n
+sudo certbot renew --dry-run
 ```
 
-申请成功后 certbot 会自动改 Nginx 配置加 443 和 80→443 跳转并重载。
-
-## 十一、防火墙
-
 ```bash
-sudo ufw allow OpenSSH
-sudo ufw allow 'Nginx Full'
-sudo ufw enable
+sudo ufw allow OpenSSH && sudo ufw allow 'Nginx Full' && sudo ufw enable
 sudo ufw status
 ```
 
-## 十二、备份（别跳过）
+## 七、告诉前端两个地址
+
+前端不需要知道我们服务器的 IP，只需要：
+
+1. **API 地址**：`https://api.geo.example.com/api/v1`，配到 Vercel 环境变量（如 `NEXT_PUBLIC_API_BASE`）。
+2. **后端已支持 Vercel 预览域名**：`CORS_ORIGIN_REGEX` 已配，PR 预览不用每次加白名单。
+
+唯一的例外是 Supabase 的 Redirect URL——登录回调走 Supabase，不走我们，必须在前端那边把 Vercel 域名加进 Supabase 的 URL Configuration。
+
+## 八、备份
+
+数据库在 Supabase，备份分两层：
+
+1. **Supabase 自带**：Free 计划没有自动备份，Pro 有每日备份（Project Settings → Database → Backups）。演示前确认一下计划。
+2. **自己再打一份**（不依赖任何计划）：
 
 ```bash
+# 只装客户端（约 30MB），不装服务端、不启动任何服务——服务器上仍然没有本地数据库
+sudo apt install -y postgresql-client
+
 mkdir -p /opt/geo/backups
+chmod 600 /opt/geo/backend/deploy/backup.sh
 crontab -e
 ```
 
 ```cron
-# 每天 3 点备份数据库，保留 14 天
-0 3 * * * pg_dump "postgresql://geo:你的密码@127.0.0.1:5432/geo" | gzip > /opt/geo/backups/geo-$(date +\%F).sql.gz && find /opt/geo/backups -name 'geo-*.sql.gz' -mtime +14 -delete
+# 每周一 04:00 导出一次，保留 8 周。脚本自己从 .env 读连接串
+0 4 * * 1 /opt/geo/backend/deploy/backup.sh >> /opt/geo/backups/backup.log 2>&1
 ```
 
-恢复演练（至少做一次，否则出事时手会抖）：
+`deploy/backup.sh` 从 `.env` 里读 `DATABASE_URL`（自动去掉 `+asyncpg` 后缀）调 `pg_dump`，失败会以非 0 退出。恢复演练至少做一次——出事时手会抖：
 
 ```bash
-gunzip -c /opt/geo/backups/geo-2026-11-20.sql.gz | psql "postgresql://geo:密码@127.0.0.1:5432/geo"
+gunzip -c /opt/geo/backups/geo-2026-11-22.sql.gz | psql "<连接串>"
 ```
 
-## 十三、更新与回滚
-
-### 一条命令更新
-
-`/opt/geo/deploy.sh`：
+## 九、更新与回滚
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-echo "==> 后端"
-cd /opt/geo/backend
-git pull --ff-only
-.venv/bin/pip install -e . -q
-.venv/bin/alembic upgrade head
-sudo /usr/bin/systemctl restart geo-api
-
-echo "==> 前端"
-cd /opt/geo/frontend
-git pull --ff-only
-pnpm install --frozen-lockfile
-pnpm build
-rsync -a --delete dist/ /var/www/geo/
-
-echo "==> 健康检查"
-sleep 2
-curl -fsS http://127.0.0.1:8000/api/v1/health && echo " OK"
+/opt/geo/deploy.sh               # 拉代码 + 装依赖 + 跑测试 + 重启 + 自检
+/opt/geo/deploy.sh --no-pull     # 只重启（改了 .env 之后用）
 ```
 
-```bash
-chmod +x /opt/geo/deploy.sh
-```
+脚本会跑 `pytest`，测试不过直接中止——比发上去再回滚便宜。`verify` 那一步不阻断发版，因为表结构由 SQL 脚本单独管，和代码不是同一次变更；但它一旦 FAIL 必须立刻看。
 
 免密重启（只放开这一条命令，别给全量 sudo）：
 
@@ -415,51 +329,56 @@ sudo visudo -f /etc/sudoers.d/geo
 deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart geo-api, /usr/bin/systemctl status geo-api
 ```
 
-### 回滚
+回滚：
 
 ```bash
-cd /opt/geo/backend && git log --oneline -5      # 找到上一个好版本
-git checkout <commit> && sudo systemctl restart geo-api
-# 前端同理，然后重新 pnpm build + rsync
+cd /opt/geo/backend
+git log --oneline -10
+git checkout <上一个好版本>
+sudo systemctl restart geo-api
 ```
 
-数据库回滚：迁移有 `downgrade` 才可退，否则从备份恢复。**每周演示前打一次备份**，比什么都实在。
+前端回滚在 Vercel 后台点 Redeploy / Promote，不归这台机器。
 
-## 十四、部署验收清单
+## 十、部署验收清单
 
-- [ ] `https://geo.example.com` 打开是前端登录页，地址栏有锁
-- [ ] `http://geo.example.com` 自动跳 https
-- [ ] `https://geo.example.com/api/v1/health` 返回 `{"code":"ok",...}`
-- [ ] 登录成功，刷新页面不掉登录态
-- [ ] 直接访问 `https://geo.example.com/projects/p_1` 刷新不 404
-- [ ] 浏览器控制台无跨域报错
-- [ ] `sudo systemctl status geo-api` 是 active (running)，`journalctl` 里日志是 JSON 单行
-- [ ] 服务器重启后服务自动起来（`sudo reboot` 试一次）
+- [ ] `curl https://api.geo.example.com/health` 返回 `{"code":"ok",...}`
+- [ ] `curl https://api.geo.example.com/api/v1/ready` 返回 `database: ok`，没有缺表
+- [ ] `.venv/bin/python -m app.cli verify` 全 `[OK]`
+- [ ] `systemctl status geo-api` 是 active (running)，日志是 JSON 单行
+- [ ] `systemctl list-timers geo-collect.timer` 显示下次触发时间
+- [ ] `sudo systemctl start geo-collect.service` 能跑完，`journalctl` 里有「采集结束 | 成功 N」
+- [ ] 前端页面能看到当天数字（说明 Supabase 那边视图和 RLS 也通了）
+- [ ] 前端点「采集」按钮返回 202，`/runs` 能看到新批次
+- [ ] `sudo reboot` 后服务和 timer 都自动起来
 - [ ] `crontab -l` 里有备份任务
 
-## 十五、排错对照表
+## 十一、排错对照表
 
 | 现象 | 原因 | 排查 |
 |---|---|---|
-| 502 Bad Gateway | 后端没起来或端口不对 | `systemctl status geo-api`；`curl 127.0.0.1:8000/api/v1/health` |
-| 刷新子路由 404 | Nginx 缺 `try_files ... /index.html` | 检查 location / 配置 |
-| 页面空白但接口 200 | 前端 `VITE_API_BASE` 打包时没生效 | 重新 `pnpm build`，确认 `.env.production` |
-| 接口 500，日志有 CSRF/连接错 | `DATABASE_URL` 密码或驱动错 | 用 psql 手动连一次验证；确认装了 `asyncpg` |
-| 证书申请失败 | DNS 未生效或 80 被占用 | `ping` 域名；`nginx -t`；临时停 Nginx 试 |
-| `alembic upgrade` 报 relation 不存在 | 没跑迁移就到新版本代码 | 先迁移再重启 |
-| 构建被 Killed | 内存不足 | 加 swap，或本地构建后只传 `dist/` |
+| `ENETUNREACH` 连不上库 | 用了 `db.xxx.supabase.co` 直连串，该域名只有 IPv6 | 换成 Session pooler 串 |
+| `unrecognized configuration parameter "sslmode"` | 老版本代码没做参数翻译 | 更新到最新代码；临时可手动删 `?sslmode=require` |
+| `password authentication failed` | 密码里的特殊字符没转义 | 密码含 `@ # / ?` 时用 URL 编码，或换成只含字母数字的密码 |
+| 502 Bad Gateway | 后端没起来 | `systemctl status geo-api`；`curl 127.0.0.1:8000/api/v1/health` |
+| 浏览器报 CORS，日志里没请求 | `CORS_ORIGINS` 没写前端实际域名 | 改成真实域名；预览域名确认 `CORS_ORIGIN_REGEX` 生效 |
+| 接口 401，token 明明刚拿到 | `SUPABASE_URL` 没填或填错项目 | `curl $SUPABASE_URL/auth/v1/health`；确认和前端是同一个项目 |
+| `verify` 报视图 security_invoker | 视图被 `create or replace` 过 | 重跑 `docs/sql/02-auth.sql` 里改视图的那几行 |
+| 采集任务 1 小时被 systemd 杀掉 | 引擎限流或密钥错，60 个请求全在等重试 | `journalctl -u geo-collect` 看失败原因；修完手动 `start` 一次 |
+| timer 不触发 | 单元文件改了没 `daemon-reload` | `systemctl daemon-reload && systemctl restart geo-collect.timer` |
+| 看板数字比昨天少了 | 当天采集失败，或跨时区归日 | `.venv/bin/python -m app.cli stats --days 3` 看哪天没数据 |
 
-## 十六、安全底线
+## 十二、安全底线
 
-1. `.env` 永不入库（`.gitignore` 已覆盖），服务器上 `chmod 600 .env`
-2. 数据库只监听 127.0.0.1，安全组不放行 5432
-3. 服务用 `deploy` 普通用户跑，不用 root
-4. 服务器放的是**专用部署密钥**，不是你的个人私钥；仓库只能读
-5. `JWT_SECRET` 必须换成随机值，默认值等于没有鉴权
-6. 定期 `sudo apt upgrade -y`，`unattended-upgrades` 可开
+1. `.env` 永不入库（`.gitignore` 已覆盖），服务器上 `chmod 600`
+2. 数据库不由本机暴露，安全组不放行 5432；服务器也不需要对外开 8000
+3. 服务用 `deploy` 普通用户跑，单元文件已带 `NoNewPrivileges` / `ProtectSystem=full`
+4. 服务器放的是**只读部署密钥**，不是个人私钥
+5. Supabase 的 `service_role` key 不要放进服务器 `.env`：我们用连接串直连，不需要它
+6. 定期 `sudo apt upgrade -y`；`unattended-upgrades` 可开
 
-## 十七、W2 之后的扩展点
+## 十三、后期扩展点
 
-- **采集任务**需要长时间运行：现在是 systemd 起的 API 进程内 APScheduler，量大了要拆出独立 worker 进程（同一个仓库，`python -m app.worker`，再建一个 systemd unit）
-- **采集接口超时**：Nginx `proxy_read_timeout` 已设 180s，但仍建议采集走「提交任务 + 轮询进度」，不要让 HTTP 请求等结果
-- **多机/容器化**：规模上来再上 Docker Compose 或 K8s，现在单机完全够
+- **采集量上来**：`collect --all` 改成按项目分片（多个 timer 单元，每个 `--project xxx`），避免一轮跑太久
+- **任务可靠性**：现在采集是「一个进程跑完」，没有失败重试队列。批量大了之后建议把 collector 拆成 worker，配 Redis 队列
+- **多机/容器**：现在单机足够。真要上容器，把 `deploy/` 换成 Dockerfile + compose，`.env` 逻辑不变

@@ -2,8 +2,8 @@
 
 GEO 优化监测平台后端 —— 监测品牌在生成式引擎（DeepSeek / 豆包 / 通义等）回答中的曝光情况。
 
-技术方案是 **Supabase 直连（BaaS）**，前端直接读视图，所以这里没有 REST 业务接口。本仓库负责三件事：
-**去各家引擎问问题 → 判断回答里提到了谁 → 算成每天的指标**，以及一套留着做运维与扩展的 FastAPI 骨架。
+技术方案是 **Supabase 直连（BaaS）**，前端直接读视图取数，所以这里没有为看板服务的 REST 业务接口（只有触发采集、重算指标、运行记录这几个受保护接口）。
+本仓库负责三件事：**去各家引擎问问题 → 判断回答里提到了谁 → 算成每天的指标**。
 
 - 技术栈：Python 3.11+ / SQLAlchemy 2（async）/ asyncpg / Supabase Postgres / httpx
 - 核心链路：问题库 × 引擎 → 采集原始回答 → 提及/位次分析 → 每日指标 → 看板视图 → 导出
@@ -19,7 +19,8 @@ GEO 优化监测平台后端 —— 监测品牌在生成式引擎（DeepSeek / 
 | [docs/06-frontend-handoff.md](docs/06-frontend-handoff.md) | 发给前端的对接清单（SQL 执行步骤、控制台设置、排错） |
 | [docs/07-backend.md](docs/07-backend.md) | 采集与分析服务：结构、命令行、指标口径、加引擎、定时任务 |
 | [docs/08-backend-api.md](docs/08-backend-api.md) | 后端接口：Supabase JWT 校验、角色判定、采集触发/重算/运行记录 |
-| [docs/02-deploy.md](docs/02-deploy.md) | 服务器部署手册：Nginx + systemd + HTTPS + 更新回滚 |
+| [docs/02-deploy.md](docs/02-deploy.md) | 服务器部署手册：Supabase + Vercel + 采集机，systemd / Nginx / HTTPS / 备份 / 回滚 |
+| [deploy/](deploy/) | 可直接用的部署文件：systemd 单元、Nginx 配置、更新脚本、备份脚本 |
 | [docs/03-github.md](docs/03-github.md) | GitHub 操作清单：建仓、权限、CI、部署密钥、协作规范 |
 
 ## 采集服务快速开始

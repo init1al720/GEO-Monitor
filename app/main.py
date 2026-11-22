@@ -54,6 +54,8 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
+        # Vercel 的预览域名每次部署都变，用正则匹配整段，避免把 * 打开
+        allow_origin_regex=settings.cors_origin_regex or None,
         # 通配来源时不能开 credentials，否则浏览器会直接拒绝
         allow_credentials="*" not in origins,
         allow_methods=["*"],

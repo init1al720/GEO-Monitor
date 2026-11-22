@@ -1,0 +1,33 @@
+[Unit]
+Description=GEO 每日采集（一次跑完所有项目）
+Documentation=file:///opt/geo/backend/docs/02-deploy.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/geo/backend
+
+# 采集日志的时间戳跟业务时区一致，排查「哪天的数据少了」时不用心算时差
+Environment=TZ=Asia/Shanghai
+
+# --all：每个项目跑一轮，单个项目失败不影响其他项目。
+# 采集完会自动重算当天指标（COLLECT_AUTO_METRICS），不需要额外跑 metrics。
+ExecStart=/opt/geo/backend/.venv/bin/python -m app.cli collect --all
+
+# 正常一轮 20 个问题 × 3 个引擎约 10 分钟。设 1 小时是为了让「卡死的引擎调用」
+# 最终被 systemd 杀掉，而不是挂一整天。真超过 1 小时说明有限流或密钥问题。
+TimeoutStartSec=3600
+
+# 采集是网络 IO 密集型，压低 CPU 与磁盘优先级，别和 API 抢资源
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/geo/backend
