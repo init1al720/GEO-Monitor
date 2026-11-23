@@ -4,7 +4,7 @@
 
 现在的情况：线上 Supabase 里只有三张图表表（`metrics` / `source_distribution` / `radar_metrics`），每张 4 行手填数据，而且**任何拿到仓库地址的人都能改**（RLS 没开、key 硬编码在公开仓库里）。业务表一张都没有，所以后端采集器现在无处写入。
 
-## 一、六件事，按顺序做
+## 一、七件事，按顺序做
 
 | # | 做什么 | 在哪做 | 耗时 |
 |---|---|---|---|
@@ -12,10 +12,11 @@
 | 2 | 执行 `01-schema.sql` | 同上 | 2 分钟 |
 | 3 | 执行 `02-auth.sql` | 同上 | 3 分钟 |
 | 4 | 执行 `03-fixes.sql`（实测后的修正） | 同上 | 1 分钟 |
-| 5 | 关掉 Confirm email、加 Redirect URL | Supabase → Authentication | 2 分钟 |
-| 6 | 把数据库连接串给我 | Supabase → Project Settings → Database | 1 分钟 |
+| 5 | 执行 `04-verify.sql`（验收，自动回滚） | 同上 | 1 分钟 |
+| 6 | 关掉 Confirm email、加 Redirect URL | Supabase → Authentication | 2 分钟 |
+| 7 | 把数据库连接串给我 | Supabase → Project Settings → Database | 1 分钟 |
 
-四个 `.sql` 文件我单独发你，都在后端仓库 `docs/sql/` 下。**顺序不能乱**，`03` 依赖前三个建好的表和视图。
+五个 `.sql` 文件都在**后端仓库** `docs/sql/` 下，不在前端仓库里——前端仓库没有这个目录，别去那边找。**顺序不能乱**，`03` 依赖前三个建好的表和视图，`04` 是验收脚本，跑完把输出贴回来就行。
 
 ## 二、每一步的具体操作
 
@@ -93,23 +94,29 @@ select tablename, policyname from pg_policies
 | 样本量把历史各天累加了 | 圆心显示 7 天总和，日期却标着最新一天 | 只取最新一天的 `sample_size` |
 | 信源分布把单条回答内重复域名算了多次，且没有时间窗口 | 环形图占比虚高，跟 KPI 卡片口径对不上 | 按回答去重计数 + 最近 7 天窗口 |
 
-**验证**（新建 query 执行）：
-
-```sql
--- 1. 约束应该带 NULLS NOT DISTINCT
-select conname, pg_get_constraintdef(oid) from pg_constraint
- where conrelid = 'public.daily_metrics'::regclass and contype = 'u';
-
--- 2. 三张旧表只剩 read_all_anon，历史策略已清
-select tablename, policyname from pg_policies
- where schemaname = 'public' order by tablename, policyname;
-```
-
 脚本是幂等的，中途报错可以整段重跑。加约束前会自动删掉可能已存在的重复行（保留一条），所以不用手动清理。
+
+### 第 5 步：跑验收脚本
+
+粘 `04-verify.sql` → Run。**整段执行，最后会自动 rollback**，不会留下任何测试数据，跑完直接贴输出。
+
+它会依次返回：
+
+| 输出 | 期望 |
+|---|---|
+| 约束定义 | `daily_metrics_unique ... UNIQUE NULLS NOT DISTINCT (project_id, metric_date, engine, subject)` |
+| 四个视图 | 都有 `security_invoker=true` |
+| 策略清单 | 旧表只剩 `read_all_anon`，没有 `Allow public ...` |
+| `5 唯一约束` | `OK duplicate key value violates unique constraint "daily_metrics_unique"`；出现 `FAIL` 说明约束没生效 |
+| `v_sample_summary` | `as_of` 是最新一天，`samples` 等于那天的值（不是几天之和） |
+| `v_source_distribution` | 两次输出都是 `zhihu.com 2 / 66.7`、`wikipedia.org 1 / 33.3`（第二次是为了证明窗口外的旧回答不进来） |
+| 最后六行计数 | 全部 `0`，说明回滚干净 |
+
+如果中途报错，先执行一次 `rollback;` 再整段重跑。
 
 > **前端注意**：`v_source_distribution` 现在统计**最近 7 天**，不是最新一天。环形图脚注写"近 7 天"，别写"今日"。`citation_count` 的含义也变成"引用了该域名的回答数"，不是域名出现次数——如果界面上有"引用次数"文案，建议改成"引用回答数"。
 
-### 第 5 步：两个认证设置
+### 第 6 步：两个认证设置
 
 Supabase → **Authentication** → **Sign In / Providers** → **Email**：
 
@@ -123,13 +130,13 @@ Supabase → **Authentication** → **URL Configuration**：
 
 不配这个，找回密码的邮件链接会跳到 `https://xxx.supabase.co` 而不是你的页面。
 
-### 第 6 步：给我连接串
+### 第 7 步：给我连接串
 
 Supabase → **Project Settings** → **Database** → **Connection string** → 选 **URI** 标签，复制那串 `postgresql://postgres:...`。
 
 **发我这个，不用发 service_role key。** 原因：
 
-- 我拿到连接串就能自己把四个脚本跑完、验证语义（列名、视图类型这些语法检查发现不了的问题），报错我自己修，不用你来回贴日志
+- 我拿到连接串就能自己把五个脚本跑完、验证语义（列名、视图类型这些语法检查发现不了的问题），报错我自己修，不用你来回贴日志
 - 连接串只在服务器环境变量里，不进仓库
 
 如果你更愿意给 `service_role` key 也行，但**它绝对不能出现在前端代码或仓库里**。那个 key 绕过所有 RLS，泄漏等于数据库全裸。
@@ -138,9 +145,11 @@ Supabase → **Project Settings** → **Database** → **Connection string** →
 
 ## 三、跑完回我三个信息
 
-1. 四个脚本是否有报错（有就贴报错原文，别截图，我要复制文字）
-2. 数据库连接串
-3. 第 1 步验证查询的结果（截图或文字都行，我确认写权限真的关掉了）
+1. 五个脚本是否有报错（有就贴报错原文，别截图，我要复制文字）
+2. 第 5 步 `04-verify.sql` 的完整输出（直接复制文字）
+3. 数据库连接串
+
+`03` 和 `04` 的文件内容如果没收到，跟我说一声，我直接把全文贴给你——它们在后端仓库 `docs/sql/` 下，前端仓库里没有。
 
 ## 四、之后要改前端的地方（先不用动，等表建好我给清单）
 

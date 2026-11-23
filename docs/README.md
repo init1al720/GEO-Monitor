@@ -13,13 +13,14 @@ GEO 优化监测平台（生成式引擎优化监测）。后端复用本仓库�
 | [03-github.md](./03-github.md) | GitHub 操作清单：建仓、权限、分支保护、CI、部署密钥、Actions、协作规范 | 双方 |
 | [04-supabase-contract.md](./04-supabase-contract.md) | **数据契约 v0.1（当前方案）**：6 张业务表 + 4 个视图 + 采集器契约 + 前端改造清单 | 双方 |
 | [05-auth-permission.md](./05-auth-permission.md) | **认证与权限 v0.1**：角色矩阵、RLS 策略、触发器、前端登录代码、控制台设置 | 双方 |
-| [06-frontend-handoff.md](./06-frontend-handoff.md) | **发给前端的对接清单**：四个 SQL 的执行步骤、控制台设置、验证查询、错误对照 | 前端 |
+| [06-frontend-handoff.md](./06-frontend-handoff.md) | **发给前端的对接清单**：五个 SQL 的执行步骤、控制台设置、验收脚本、错误对照 | 前端 |
 | [07-backend.md](./07-backend.md) | **采集与分析服务 v0.1**：代码结构、命令行用法、指标口径、加引擎、定时任务、已知限制 | 后端 |
 | [08-backend-api.md](./08-backend-api.md) | **后端接口 v0.1**：Supabase JWT 校验、角色判定、采集触发/重算/运行记录四个接口、错误码、前端调用示例 | 双方 |
 | [sql/00-lock-write.sql](./sql/00-lock-write.sql) | **应急：关闭演示表的匿名写权限**（16 条语句，最先执行） | 后端 |
 | [sql/01-schema.sql](./sql/01-schema.sql) | 六张业务表 + 四个视图（17 条语句） | 后端 |
 | [sql/02-auth.sql](./sql/02-auth.sql) | 认证与权限全部 SQL（86 条语句，需在 `01` 之后执行） | 后端 |
 | [sql/03-fixes.sql](./sql/03-fixes.sql) | **线上实测后的修正**：唯一约束 `NULLS NOT DISTINCT`、样本量取最新一天、信源去重 + 7 天窗口、清理历史策略（幂等） | 后端 |
+| [sql/04-verify.sql](./sql/04-verify.sql) | **验收脚本**：一处跑完 03 的 6 项检查（约束/视图/策略/样本量/信源窗口/回滚后行数），全过程事务内自动 rollback | 后端 |
 | [GEO_SaaS_平台产品总需求基线_V1.1.docx](./GEO_SaaS_平台产品总需求基线_V1.1.docx) | 需求基线修订版：11 个模块拆 M0–M4、指标口径、待确认项的建议选择 | 双方 |
 
 > **方案已变更**：数据层改为 Supabase 直连（Auth + RLS），读数据不经过我们的服务器。
@@ -28,7 +29,7 @@ GEO 优化监测平台（生成式引擎优化监测）。后端复用本仓库�
 
 ## 建议阅读顺序
 
-1. 后端：`00` → `04` → `05` → 依次执行 `sql/00-lock-write.sql`、`01-schema.sql`、`02-auth.sql`、`03-fixes.sql` → `07` → `08` → `03`
+1. 后端：`00` → `04` → `05` → 依次执行 `sql/00-lock-write.sql`、`01-schema.sql`、`02-auth.sql`、`03-fixes.sql`、`04-verify.sql` → `07` → `08` → `03`
 2. 前端：`00` 的 CI 一段 → `04` 第 4、7 节 → `05` 第 7 节（登录代码）→ `06` → `08` 第 6 节（接口调用示例）→ `03` 的协作规范
 
 ## 项目定位
